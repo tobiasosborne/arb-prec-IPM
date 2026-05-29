@@ -1,0 +1,12 @@
+{
+  "name": "sdp_sqrt2",
+  "source": "wolframscript",
+  "description": "2x2 SDP: max x_12 s.t. x_11=1, x_22=2, X 2x2 PSD. PSD requires x_12^2 <= x_11*x_22=2, so max x_12=sqrt(2) (irrational). X*=[[1,sqrt(2)],[sqrt(2),2]] is RANK-1 SINGULAR (det=0, boundary optimum). Tests high-precision irrational values.",
+  "m": 2,
+  "block_sizes": [2],
+  "maximize": true,
+  "optimal_value": "1.4142135623730950488016887242096980785696718753769480731766797379",
+  "optimal_value_digits": 65,
+  "reference_method": "Exact closed form: Cauchy-Schwarz / Schur complement: max x_12 s.t. [[1,x_12],[x_12,2]]>=0 gives x_12<=sqrt(2). Computed Sqrt[2] via N[Sqrt[2],65] in Mathematica.",
+  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0"
+}

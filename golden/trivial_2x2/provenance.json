@@ -1,0 +1,12 @@
+{
+  "name": "trivial_2x2",
+  "source": "wolframscript",
+  "description": "Trivial 2x2 SDP: max x_11 s.t. x_11=1, X>=0. Optimal X*=diag(1,0) is SINGULAR (rank-deficient boundary optimum). Tests that the solver handles PSD-boundary cases (CLAUDE.md invariant 1).",
+  "m": 1,
+  "block_sizes": [2],
+  "maximize": true,
+  "optimal_value": "1.0000000000000000000000000000000000000000000000000000000000000000",
+  "optimal_value_digits": 65,
+  "reference_method": "Exact closed form: X*=diag(1,0), opt=1 (integer).",
+  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0"
+}

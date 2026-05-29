@@ -1,0 +1,12 @@
+{
+  "name": "max_eig_tridiag_3x3",
+  "source": "wolframscript",
+  "description": "3x3 SDP: max <A,X> s.t. tr(X)=1, X 3x3 PSD, where A=[[3,1,0],[1,2,1],[0,1,1]]. By variational formula opt=lambda_max(A). Eigenvalues are roots of (3-t)(2-t)(1-t)-2(3-t)-1, giving an irrational lambda_max. Optimal X* is the rank-1 projector onto the max eigenvector (singular, boundary optimum).",
+  "m": 1,
+  "block_sizes": [3],
+  "maximize": true,
+  "optimal_value": "3.7320508075688772935274463415058723669428052538103806280558069794",
+  "optimal_value_digits": 65,
+  "reference_method": "Exact closed form: lambda_max of [[3,1,0],[1,2,1],[0,1,1]] computed symbolically in Mathematica. Characteristic polynomial roots obtained via Root[] and evaluated to 65 digits.",
+  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0"
+}
