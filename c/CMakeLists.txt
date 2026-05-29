@@ -156,3 +156,15 @@ target_compile_definitions(test_iterate
 target_link_libraries(test_iterate PRIVATE arbsdp)
 
 add_test(NAME test_iterate COMMAND test_iterate)
+
+add_executable(test_schur test/test_schur.c)
+
+target_include_directories(test_schur
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_schur PRIVATE arbsdp)
+
+add_test(NAME test_schur COMMAND test_schur)
