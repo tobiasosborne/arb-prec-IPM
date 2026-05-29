@@ -106,3 +106,15 @@ target_include_directories(test_linalg
 target_link_libraries(test_linalg PRIVATE arbsdp)
 
 add_test(NAME test_linalg COMMAND test_linalg)
+
+add_executable(test_ntscaling test/test_ntscaling.c)
+
+target_include_directories(test_ntscaling
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_ntscaling PRIVATE arbsdp)
+
+add_test(NAME test_ntscaling COMMAND test_ntscaling)
