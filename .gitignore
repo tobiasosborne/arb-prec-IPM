@@ -1,0 +1,13 @@
+c/build/
+build/
+*.o
+*.so
+*.dylib
+ArbSDP.jl/Manifest.toml
+.DS_Store
+/tmp/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
