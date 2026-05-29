@@ -220,3 +220,24 @@ target_compile_definitions(test_solve
 target_link_libraries(test_solve PRIVATE arbsdp m)
 
 add_test(NAME test_solve COMMAND test_solve)
+
+add_executable(test_precision test/test_precision.c)
+
+target_include_directories(test_precision
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+# test_precision loads the golden fixtures (sdp_sqrt2, trivial_2x2) and compares
+# the adaptively-recovered objective to the analytic golden; pass an absolute
+# golden path so the test is independent of the run directory (as test_solve does).
+target_compile_definitions(test_precision
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+# test_precision calls log10/log2/pow (digit-accuracy diagnostics) -> needs libm.
+target_link_libraries(test_precision PRIVATE arbsdp m)
+
+add_test(NAME test_precision COMMAND test_precision)
