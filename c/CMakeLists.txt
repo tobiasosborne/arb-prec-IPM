@@ -118,3 +118,22 @@ target_include_directories(test_ntscaling
 target_link_libraries(test_ntscaling PRIVATE arbsdp)
 
 add_test(NAME test_ntscaling COMMAND test_ntscaling)
+
+add_executable(test_io test/test_io.c)
+
+target_include_directories(test_io
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+# The golden fixtures live at <repo>/golden; pass an absolute path so the test
+# is independent of the run directory (ctest runs in the build tree).
+target_compile_definitions(test_io
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+target_link_libraries(test_io PRIVATE arbsdp)
+
+add_test(NAME test_io COMMAND test_io)
