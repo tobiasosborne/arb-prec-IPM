@@ -137,3 +137,22 @@ target_compile_definitions(test_io
 target_link_libraries(test_io PRIVATE arbsdp)
 
 add_test(NAME test_io COMMAND test_io)
+
+add_executable(test_iterate test/test_iterate.c)
+
+target_include_directories(test_iterate
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+# The iterate tests load golden fixtures (sdp_sqrt2); pass an absolute path so
+# the test is independent of the run directory (as test_io does).
+target_compile_definitions(test_iterate
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+target_link_libraries(test_iterate PRIVATE arbsdp)
+
+add_test(NAME test_iterate COMMAND test_iterate)
