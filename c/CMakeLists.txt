@@ -180,3 +180,22 @@ target_include_directories(test_regularize
 target_link_libraries(test_regularize PRIVATE arbsdp)
 
 add_test(NAME test_regularize COMMAND test_regularize)
+
+add_executable(test_direction test/test_direction.c)
+
+target_include_directories(test_direction
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+# The integration test (mu decreases) loads the sdp_sqrt2 golden fixture; pass an
+# absolute path so the test is independent of the run directory (as test_io does).
+target_compile_definitions(test_direction
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+target_link_libraries(test_direction PRIVATE arbsdp)
+
+add_test(NAME test_direction COMMAND test_direction)
