@@ -168,3 +168,15 @@ target_include_directories(test_schur
 target_link_libraries(test_schur PRIVATE arbsdp)
 
 add_test(NAME test_schur COMMAND test_schur)
+
+add_executable(test_regularize test/test_regularize.c)
+
+target_include_directories(test_regularize
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_regularize PRIVATE arbsdp)
+
+add_test(NAME test_regularize COMMAND test_regularize)
