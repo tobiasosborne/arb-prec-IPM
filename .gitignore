@@ -1,4 +1,5 @@
 c/build/
+c/build-asan/
 build/
 *.o
 *.so
