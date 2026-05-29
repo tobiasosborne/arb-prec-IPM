@@ -66,6 +66,16 @@ These apply to every agent, every session, every commit.
    ```
    When the PRD and a stray note disagree, the PRD wins. When the paper and your
    memory disagree, the paper wins.
+   **Establishing ground truth is active, not passive: research best-in-class
+   algorithms, solutions, libraries and references first, and AUDITION the
+   candidates to find the best for our case — do not default to the first or
+   most familiar option (including the TS port).** The TS solver is a *starting*
+   reference, not a ceiling. For any nontrivial algorithmic choice (eig/sqrt,
+   verified λ_min, the verified-SDP bound itself, the precision controller, the
+   KKT solve), survey the state of the art (papers, what SDPA/MOSEK/SDPT3/Clarabel/
+   verified-SDP tools actually do), compare on accuracy/rigor/cost for SMALL arb
+   problems, record the comparison + the decision (with the loser's reason), then
+   implement the winner. Cite what you adopted and why it beat the alternatives.
 
 4. **CROSS-CHECKS > UNIT TESTS — golden masters are the test strategy.** Two
    relations, both first-class (PRD §6): *beat* (more correct digits than a float
