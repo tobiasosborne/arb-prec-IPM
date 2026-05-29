@@ -76,6 +76,12 @@ faster and do not inflate radii.
    factorization (b12/b14). `arb_mat_spd_solve` is the one-shot convenience form.
 4. **String memory:** always `flint_free` the result of `arb_get_str`; ASan/valgrind
    gate (CLAUDE rule 7) will catch omissions.
+5. **`flint.pc` omits `-lflint` (Ubuntu 3.0.1 packaging).** The installed pkg-config
+   `Libs:` line lists only `-lgmp -lmpfr`, NOT `-lflint`. So `pkg_check_modules(flint)`
+   alone does NOT link libflint — `${FLINT_LIBRARIES}` = `gmp;mpfr`. The CMake must add
+   `flint` explicitly to `target_link_libraries` (done in b04). Latent until the first
+   Arb-using TU (version.c uses no Arb; svec.c was the first and surfaced
+   `undefined reference to arb_*`). Found in b04.
 
 ## Probe
 `docs/probes/arb_mat_cho_probe.c` — compiles under `-fsanitize=address,undefined -g`
