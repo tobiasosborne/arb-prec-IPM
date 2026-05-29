@@ -323,7 +323,7 @@ bd close <id>         # Complete work
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Use `bd` for durable issue tracking — do NOT use TodoWrite or markdown TODO lists. **TaskCreate/TaskList ARE allowed** for ephemeral in-session tracking (owner override; see the "Issue tracking" section above — this supersedes the bd-init default that bans TaskCreate).
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
