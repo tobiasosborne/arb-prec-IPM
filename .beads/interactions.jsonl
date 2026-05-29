@@ -1,0 +1,2 @@
+{"id":"int-eefff931","kind":"field_change","created_at":"2026-05-29T11:39:35.740835261Z","actor":"tobias","issue_id":"arb-prec-IPM-b03","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-c78784da","kind":"field_change","created_at":"2026-05-29T11:47:11.96774632Z","actor":"tobias","issue_id":"arb-prec-IPM-b03","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"MATH_SPEC.md written (842 lines), all formulas cited to TS file:line or paper; 6 open questions adjudicated in §10."}}
