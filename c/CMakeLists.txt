@@ -199,3 +199,24 @@ target_compile_definitions(test_direction
 target_link_libraries(test_direction PRIVATE arbsdp)
 
 add_test(NAME test_direction COMMAND test_direction)
+
+add_executable(test_solve test/test_solve.c)
+
+target_include_directories(test_solve
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+# The end-to-end solve tests load the golden fixtures and compare the recovered
+# objective to the analytic 65-digit optima; pass an absolute golden path so the
+# test is independent of the run directory (as test_io / test_direction do).
+target_compile_definitions(test_solve
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+# test_solve calls log10 directly (digit-accuracy diagnostic) -> needs libm.
+target_link_libraries(test_solve PRIVATE arbsdp m)
+
+add_test(NAME test_solve COMMAND test_solve)
