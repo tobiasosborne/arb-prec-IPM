@@ -94,3 +94,15 @@ target_include_directories(test_svec
 target_link_libraries(test_svec PRIVATE arbsdp)
 
 add_test(NAME test_svec COMMAND test_svec)
+
+add_executable(test_linalg test/test_linalg.c)
+
+target_include_directories(test_linalg
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_linalg PRIVATE arbsdp)
+
+add_test(NAME test_linalg COMMAND test_linalg)
