@@ -8,5 +8,18 @@
   "optimal_value": "3.7320508075688772935274463415058723669428052538103806280558069794",
   "optimal_value_digits": 65,
   "reference_method": "Exact closed form: lambda_max of [[3,1,0],[1,2,1],[0,1,1]] computed symbolically in Mathematica. Characteristic polynomial roots obtained via Root[] and evaluated to 65 digits.",
-  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0"
+  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0",
+  "expected_status": "optimal",
+  "target_digits": 12,
+  "prec_cap": 1024,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 8,
+  "expected_max_iters": 100,
+  "known_gaps": [
+    {
+      "kind": "efficiency",
+      "bead": "arb-prec-IPM-b30",
+      "reason": "achieved ~75 bits/digit (final_prec 1024 for 13.7 achieved digits); rank-1 projector boundary optimum with irrational 2+sqrt(3), NUM status at prec 128/256/512 until 1024 reaches OPT."
+    }
+  ]
 }

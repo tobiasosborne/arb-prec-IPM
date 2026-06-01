@@ -42,6 +42,33 @@ golden/
 `block_sizes`: positive integer = PSD block of that size; negative integer = diagonal (LP) block.
 `maximize: true` means the problem is stated as a maximization (SDPA convention).
 
+### provenance.json schema v2 (runner fields)
+
+v2 adds runner-facing fields consumed by the adaptive-solve regression gate. All
+are OPTIONAL on read: a file without them falls back to the listed DEFAULT, so v1
+files keep parsing. Calibrate the numbers from measured solver behavior
+(`bench/brittle_probe.c`), never guess.
+
+| Field | Type | Default when absent | Meaning |
+|-------|------|---------------------|---------|
+| `expected_status` | string | `"optimal"` | Required terminal status (`optimal`, `primal_infeasible`, `dual_infeasible`). |
+| `target_digits` | int | `15` | Digits the runner REQUESTS and VERIFIES. Must be reachable within `prec_cap`; set at or just below the digits the adaptive solver actually achieves, so the correctness assertion PASSES. |
+| `prec_cap` | int | `8192` | `prec_max` bits for the adaptive solve; a power of 2, set to the final_prec the problem needed (rounded up). |
+| `correctness_tol_digits` | int | `0` | Slack on `target_digits` the correctness check tolerates (0 = exact reach required). |
+| `expected_max_bits_per_digit` | int | `8` | GOAL ceiling on final_prec/achieved_digits (b30 target ~3-6). The current solver is far above 8 on every problem — that overrun is the `efficiency` known_gap, not a surprise. |
+| `expected_max_iters` | int | `100` | Ceiling on adaptive iterations. |
+| `known_gaps` | array | `[]` | Expected-fail markers; each `{kind, bead, reason}` with a CONCRETE measured reason. |
+
+`known_gaps[].kind` vocabulary:
+- `status` — the solver returns a different terminal status than `expected_status`.
+- `correctness` — `target_digits` (within `correctness_tol_digits`) is NOT reached within `prec_cap`.
+- `efficiency` — the bits/digit or iteration budget (`expected_max_bits_per_digit`, `expected_max_iters`) is exceeded.
+
+xfail semantics: a `known_gap` of a given kind makes the gate TOLERATE that
+failure class for this problem (expected-fail, reported but not fatal); but the
+gate FAILS if that case unexpectedly PASSES, forcing removal of the now-stale
+marker so the bar ratchets up.
+
 ### .dat-s format (SDPA sparse)
 
 Parsed by `SdpaSparse.ts` (packages/solver-ipm/src/format/SdpaSparse.ts):

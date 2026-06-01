@@ -8,5 +8,23 @@
   "optimal_value": "1.0000010000000000000000000000000000000000000000000000000000000000",
   "optimal_value_digits": 65,
   "reference_method": "Exact closed form: opt = 1 + 10^(-6) = 1000001/1000000 (exact rational arithmetic in Mathematica).",
-  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0"
+  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0",
+  "expected_status": "optimal",
+  "target_digits": 12,
+  "prec_cap": 1024,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 8,
+  "expected_max_iters": 100,
+  "known_gaps": [
+    {
+      "kind": "correctness",
+      "bead": "arb-prec-IPM-p68",
+      "reason": "adaptive returns ADAPTIVE_OPTIMAL at final_prec=128 (no escalation) but the recovered objective midpoint is only ~8.9 digits vs target 12: the 6-flag inner tolerance (1e-12) passes on scaled residuals while the point-mode objective recovery at 128 bits is conditioning-limited (epsilon=1e-6 nearly-flat objective). p68 (controller must validate objective accuracy / set prec floor from target_digits); root cause shared with b30."
+    },
+    {
+      "kind": "efficiency",
+      "bead": "arb-prec-IPM-b30",
+      "reason": "at the natural escalation ceiling (target_digits=30 forces escalation to 1024 bits for 14.1 objective digits) the cost is ~73 bits/digit, far above the 8 b/d goal; epsilon=1e-6 ill-conditions the Schur complement (NUM at 128/256/512 until 1024)."
+    }
+  ]
 }

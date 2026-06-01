@@ -241,3 +241,26 @@ target_compile_definitions(test_precision
 target_link_libraries(test_precision PRIVATE arbsdp m)
 
 add_test(NAME test_precision COMMAND test_precision)
+
+# The GATED golden-master runner (bead arb-prec-IPM-epic.1): the primary Layer-0
+# robustness gate.  Compiles the provenance scanner into the executable and reads
+# golden_discover(GOLDEN_DIR, ...).  Mirrors test_io's absolute GOLDEN_DIR compile
+# definition; adds the test/ dir to the include path for golden_provenance.h and
+# links libm for log10 (digits_matched diagnostic).
+add_executable(test_golden test/test_golden.c test/golden_provenance.c)
+
+target_include_directories(test_golden
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test
+)
+
+target_compile_definitions(test_golden
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+target_link_libraries(test_golden PRIVATE arbsdp m)
+
+add_test(NAME test_golden COMMAND test_golden)

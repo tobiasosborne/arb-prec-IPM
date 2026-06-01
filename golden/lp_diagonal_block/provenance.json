@@ -8,5 +8,18 @@
   "optimal_value": "7.0000000000000000000000000000000000000000000000000000000000000000",
   "optimal_value_digits": 65,
   "reference_method": "Exact closed form: LP vertex enumeration, unique optimal vertex (1,3) with obj=1+2*3=7 (integer).",
-  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0"
+  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0",
+  "expected_status": "optimal",
+  "target_digits": 11,
+  "prec_cap": 1024,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 8,
+  "expected_max_iters": 100,
+  "known_gaps": [
+    {
+      "kind": "efficiency",
+      "bead": "arb-prec-IPM-b30",
+      "reason": "achieved ~81 bits/digit (final_prec 1024 for 12.7 achieved digits); LP-as-diagonal-block vertex optimum sits on the nonneg-orthant boundary, NUM status at prec 128/256/512 until 1024 reaches OPT."
+    }
+  ]
 }

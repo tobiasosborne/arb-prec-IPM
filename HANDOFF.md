@@ -14,6 +14,30 @@ start Layer-1 work until the Layer-0 approximate solver is correct and performan
 Your work is beads **b29 (P0 crash), b30 (P0 cone-safety), b31 (P1 perf), b32 (P1
 tests)** — in roughly that order.
 
+## Progress (2026-06-01, later session)
+
+- **b29 DONE** (commit fb57325): `read_sdpa` is foolproof on a non-init'd struct
+  (init-not-clear at entry); normal-build regression test guards it.
+- **epic.1 DONE**: `test_golden` — the GATED golden-master runner. Provenance schema
+  v2 (`expected_status`, `target_digits`, `prec_cap`, `expected_max_bits_per_digit`,
+  `expected_max_iters`, `known_gaps[{kind,bead,reason}]`) + auto-discovery
+  (`golden_provenance.{h,c}`) + correctness/efficiency assertions with a
+  `known_gap` XFAIL/XPASS **ratchet** (a stale gap fails the gate, forcing removal).
+  Runs both build configs (12/12); mutation-proven both directions. The 7 goldens are
+  green with 9 visible XFAILs: efficiency→b30 (all 7, ~14–158 bits/digit vs 8 goal);
+  correctness→p68 (trivial_2x2 6.7/12, ill_conditioned_3x3 8.9/12). This is the
+  measurement b30 must move. Next punishing problems: epic.2 (infeasible/unbounded),
+  epic.3 (size/conditioning), epic.4 (SDPLIB/DIMACS), epic.5 (Nemo oracle).
+- **NEW FINDING — b/p68 (P1, blocked by b30):** the adaptive controller returns
+  `ARBSDP_ADAPTIVE_OPTIMAL` whenever the inner 6-flag test passes at tol
+  `10^-target_digits`, but near the PSD boundary at low working precision the recovered
+  OBJECTIVE is well short of `target_digits` (trivial_2x2: prec0=128 stops immediately,
+  6.7 objective digits for a target of 12). `solve_meets_target` (precision.c) trusts
+  the residual gate without validating objective accuracy or setting a prec floor from
+  `target_digits` (cf. PRD §4.3). The 5 "passing" goldens only clear their target
+  because the b30 cone-exit *forces* over-escalation. Fix with b30, then this is the
+  controller's accuracy contract.
+
 ## What exists and works
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build

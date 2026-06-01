@@ -8,5 +8,23 @@
   "optimal_value": "1.0000000000000000000000000000000000000000000000000000000000000000",
   "optimal_value_digits": 65,
   "reference_method": "Exact closed form: X*=diag(1,0), opt=1 (integer).",
-  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0"
+  "generated_by": "arbsdp golden-master generator b09 / wolframscript 1.13.0",
+  "expected_status": "optimal",
+  "target_digits": 12,
+  "prec_cap": 1024,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 8,
+  "expected_max_iters": 100,
+  "known_gaps": [
+    {
+      "kind": "correctness",
+      "bead": "arb-prec-IPM-p68",
+      "reason": "adaptive returns ADAPTIVE_OPTIMAL at final_prec=128 (no escalation) but the recovered objective midpoint is only ~6.7 digits vs target 12: the 6-flag inner tolerance (1e-12) passes on scaled residuals while the point-mode objective recovery at 128 bits is precision/conditioning-limited near the singular X*=diag(1,0) boundary. p68 (controller must validate objective accuracy / set prec floor from target_digits); root cause shared with b30 (cone safety)."
+    },
+    {
+      "kind": "efficiency",
+      "bead": "arb-prec-IPM-b30",
+      "reason": "at the natural escalation ceiling (target_digits=30 forces escalation to 1024 bits for 14.2 objective digits) the cost is ~72 bits/digit, far above the 8 b/d goal; the b30 PSD-boundary brittleness (NUM at 128/256/512) is the driver."
+    }
+  ]
 }
