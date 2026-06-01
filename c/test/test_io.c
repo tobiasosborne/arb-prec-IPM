@@ -427,6 +427,50 @@ test_b_vector(void)
     arbsdp_problem_clear(&p);
 }
 
+/* ----- Test 7 (bead b29): read_sdpa must be FOOLPROOF on a non-init'd struct --
+ * REGRESSION: arbsdp_read_sdpa formerly called arbsdp_problem_clear(p) at entry,
+ * which free()d p->b / p->mats / p->block_sizes.  On a struct the caller never
+ * arbsdp_problem_init'd, those are garbage pointers -> free() of garbage -> heap
+ * corruption / SIGSEGV (masked under ASan; missed by every other test, which all
+ * init first).  CLAUDE.md rule 5: a corrupted heap is worse than any crash.
+ *
+ * We simulate an uninitialized struct by filling every owned field with a
+ * non-NULL, NON-HEAP sentinel.  The OLD reader dereferenced + freed these (the
+ * normal-build glibc allocator aborts on free() of an invalid pointer); the fixed
+ * reader must initialize internally and never touch the caller's prior contents.
+ * RED-GREEN: this test aborts/fails on the pre-b29 reader and passes after.  It
+ * must run under the NORMAL build (not just ASan) -- this footgun only bit there. */
+static void
+test_read_uninitialized(void)
+{
+    char path[1024];
+    arbsdp_problem p;
+    static char sentinel[64]; /* static storage: NOT freeable -> nothing to leak */
+    int rc;
+
+    golden_path(path, sizeof(path), "trivial_2x2");
+
+    /* Garbage, as if `arbsdp_problem p;` were used without arbsdp_problem_init. */
+    memset(sentinel, 0xA5, sizeof(sentinel));
+    p.m           = 12345;
+    p.nblocks     = 678;
+    p.block_sizes = (int *) sentinel;
+    p.b           = (char **) sentinel;
+    p.mats        = (arbsdp_matblock *) sentinel;
+    p.maximize    = -999;
+
+    rc = arbsdp_read_sdpa(&p, path); /* must NOT deref/free the sentinels */
+
+    CHECK(rc == 0, "read_uninitialized: trivial_2x2 must parse");
+    CHECK(p.m == 1, "read_uninitialized: m must be parsed (=1)");
+    CHECK(p.nblocks == 1, "read_uninitialized: nblocks must be parsed (=1)");
+    CHECK(p.block_sizes != (int *) sentinel && p.block_sizes != NULL
+              && p.block_sizes[0] == 2,
+          "read_uninitialized: block_sizes must be freshly allocated (=2)");
+
+    arbsdp_problem_clear(&p); /* frees ONLY the real heap read_sdpa allocated */
+}
+
 int
 main(void)
 {
@@ -436,6 +480,7 @@ main(void)
     test_malformed();
     test_mutation_2v();
     test_b_vector();
+    test_read_uninitialized();
 
     if (failures != 0) {
         fprintf(stderr, "test_io: %d check(s) FAILED\n", failures);

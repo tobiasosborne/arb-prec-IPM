@@ -133,17 +133,26 @@ void arbsdp_problem_clear(arbsdp_problem *p);
  * ---------------------------------------------------------------------- */
 
 /*
- * arbsdp_read_sdpa -- parse a .dat-s file into `p` (which must be init'd; any
- * prior contents are cleared first).  Matches SdpaSparse.ts semantics: comment
- * lines starting with '*' or '"' are skipped; a trailing "= ..." on a line is
- * treated as a comment (stripped); the first four non-comment lines are
- * m, nblocks, the block sizes, the b vector; remaining lines are
- * "<matno> <blk> <k> <l> <v>" entries with 1-indexed k <= l and 1-indexed blk.
+ * arbsdp_read_sdpa -- parse a .dat-s file into `p`.  Matches SdpaSparse.ts
+ * semantics: comment lines starting with '*' or '"' are skipped; a trailing
+ * "= ..." on a line is treated as a comment (stripped); the first four
+ * non-comment lines are m, nblocks, the block sizes, the b vector; remaining
+ * lines are "<matno> <blk> <k> <l> <v>" entries with 1-indexed k <= l and
+ * 1-indexed blk.
+ *
+ * FOOLPROOF CONTRACT (bead b29; CLAUDE.md rule 5): `p` may be UNINITIALIZED
+ * (e.g. a bare `arbsdp_problem p;`).  read_sdpa initializes it internally and
+ * NEVER dereferences or frees `p`'s prior field contents -- so a non-init'd
+ * struct cannot corrupt the heap.  The flip side: re-reading into an ALREADY
+ * LOADED struct would leak its prior contents, so call arbsdp_problem_clear(p)
+ * before re-reading.  (A leak is recoverable and ASan/valgrind-caught; a freed
+ * garbage pointer is not.)  Calling arbsdp_problem_init(p) first is harmless.
  *
  * Returns 0 on success, nonzero on malformed input (CLAUDE.md rule 5, fail
  * loud): unreadable file, bad/missing integer or decimal token, block-size
  * count != nblocks, b count != m, out-of-range matno/block/index, or k > l.
- * On failure `p` is left cleared (init'd, empty).
+ * After return `p` is always in a valid state: loaded on success, cleared
+ * (init'd, empty) on failure -- arbsdp_problem_clear(p) is always safe.
  */
 int arbsdp_read_sdpa(arbsdp_problem *p, const char *path);
 

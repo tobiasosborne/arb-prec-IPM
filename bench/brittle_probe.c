@@ -5,8 +5,10 @@
  *   gcc bench/brittle_probe.c -o /tmp/bp -I c/include -L c/build -larbsdp \
  *       -lflint -lmpfr -lgmp -Wl,-rpath,c/build
  *   /tmp/bp <target_digits=15> <prec_max=8192>
- * Reproduces: the read_sdpa heap-corruption (remove the arbsdp_problem_init line),
- * the per-precision NUM trajectory (iterate leaving the cone), and the wasted-solve cost.
+ * Reproduces: the per-precision NUM trajectory (iterate leaving the cone) and the
+ * wasted-solve cost.  (The former read_sdpa heap-corruption on a non-init'd struct
+ * is fixed in b29 -- read_sdpa is now foolproof; removing the init line below is
+ * harmless.)
  */
 /* Brittleness/performance probe for the Layer-0 solver. Not part of the build. */
 #define _POSIX_C_SOURCE 200809L
@@ -37,7 +39,7 @@ int main(int argc, char **argv){
     for (unsigned k=0;k<sizeof(names)/sizeof(names[0]);k++){
         char path[512];
         snprintf(path,sizeof path,"golden/%s/%s.dat-s",names[k],names[k]);
-        arbsdp_problem p; arbsdp_problem_init(&p);   /* REQUIRED: read_sdpa clears at entry */
+        arbsdp_problem p; arbsdp_problem_init(&p);   /* optional since b29: read_sdpa is foolproof */
         if (arbsdp_read_sdpa(&p, path)!=0){ printf("%-20s READ-FAIL\n",names[k]); arbsdp_problem_clear(&p); continue; }
         arbsdp_precision_params pp; arbsdp_precision_default_params(&pp);
         pp.target_digits=target; pp.prec_max=prec_max;

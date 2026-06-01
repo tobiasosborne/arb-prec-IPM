@@ -270,7 +270,14 @@ arbsdp_read_sdpa(arbsdp_problem *p, const char *path)
     int rc = 1; /* default: failure */
 
     assert(p != NULL);
-    arbsdp_problem_clear(p); /* start from a clean, init'd state */
+    /* Start from a clean state WITHOUT dereferencing *p's prior contents: the
+     * caller may pass an uninitialized struct (garbage pointers).  Clearing here
+     * would free() that garbage -> heap corruption (bead b29; CLAUDE.md rule 5: a
+     * corrupted heap is the worst possible output).  arbsdp_problem_init only
+     * writes zero/NULL, so it is foolproof on garbage AND on a fresh struct.
+     * CONTRACT (see problem.h): *p's prior heap is NOT freed -- to RE-read into a
+     * used struct, arbsdp_problem_clear(p) first, else its prior contents leak. */
+    arbsdp_problem_init(p);
 
     f = fopen(path, "r");
     if (f == NULL)
