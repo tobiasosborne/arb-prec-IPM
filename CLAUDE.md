@@ -17,9 +17,11 @@ violable decision in the project.
 ## Canonical documents — read these BEFORE writing code
 
 ```
-PRD.md            <-- start here. Scope, the layer architecture, the math spec,
-                      the roadmap, the open decisions. Canonical.
-README.md         <-- public-facing intro (once written)
+HANDOFF.md        <-- READ FIRST. Current state, the active mandate (harden the
+                      approximate solver: correctness + performance), and the
+                      brittleness diagnosis with reproduction.
+PRD.md            <-- the layer architecture, the math spec, the roadmap.
+README.md         <-- public-facing intro.
 ```
 
 External ground truth (cite these in source, see rule 3):
