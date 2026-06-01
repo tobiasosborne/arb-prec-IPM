@@ -18,7 +18,7 @@
   "known_gaps": [
     {
       "kind": "efficiency",
-      "bead": "arb-prec-IPM-b30",
+      "bead": "arb-prec-IPM-epic.6",
       "reason": "achieved ~74 bits/digit (final_prec 1024 for 13.9 achieved digits); rank-1 singular X*=[[1/2,1/2],[1/2,1/2]] boundary optimum, NUM status at prec 128/256/512 until 1024 reaches OPT."
     }
   ]

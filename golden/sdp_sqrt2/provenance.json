@@ -18,7 +18,7 @@
   "known_gaps": [
     {
       "kind": "efficiency",
-      "bead": "arb-prec-IPM-b30",
+      "bead": "arb-prec-IPM-epic.6",
       "reason": "achieved ~158 bits/digit, the worst of the set (final_prec 2048 for 13.0 achieved digits); rank-1 det=0 boundary optimum X*=[[1,sqrt(2)],[sqrt(2),2]] forces NUM through prec 128..1024; cannot reach 30 digits even at prec_cap 8192 (ALIM, NUM throughout) so 12-digit target is the sensible reachable ceiling."
     }
   ]

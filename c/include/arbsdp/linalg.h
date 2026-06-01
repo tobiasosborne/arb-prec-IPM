@@ -81,30 +81,40 @@ extern "C" {
 void arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec);
 
 /*
- * arbsdp_psd_sqrt -- out <- A^{1/2} for symmetric PSD A (POINT MODE).
+ * STRICT-PD GATE (CLAUDE.md rule 5; bead arb-prec-IPM-b30) -- both routines
+ * below RETURN A STATUS instead of silently flooring a non-PD / radius-degraded
+ * input into garbage (the prior PsdCone.ts-parity floors Math.max(0,lam) /
+ * Math.max(1e-300,lam) were a rule-5 violation in arbitrary precision).  A is
+ * "strictly PD at the working precision" iff its smallest eigenvalue clears the
+ * precision-relative floor  lambda_min > lambda_max * 2^(-prec/2)  AND its ball
+ * does not straddle zero.  Diagnosis + threshold justification are in linalg.c.
  *
- * Via eigendecomposition: A^{1/2} = Q diag(sqrt(max(0, lambda_i))) Q^T.
- * Tiny/negative eigenvalues are clamped to 0 before the sqrt (matching
- * PsdCone.ts psdSqrt, which uses Math.max(0, lambda)) so a slightly-indefinite
- * input still yields a real PSD result.
- *
- * `out` must be an initialized n x n arb_mat; A must be square (asserted).
- * out and A may NOT alias.
+ * Return 0 iff A is strictly PD (and `out` holds the requested matrix power);
+ * return nonzero (NOT PD / accuracy-exhausted) -- `out` is then a FINITE best-
+ * effort (floored eigenvalues, never NaN) but MUST NOT be trusted; the status
+ * is the source of truth.  In the IPM this nonzero return is the honest
+ * cone-exit signal that propagates to arbsdp_direction_compute -> NUMERICAL.
  */
-void arbsdp_psd_sqrt(arb_mat_t out, const arb_mat_t A, slong prec);
+
+/*
+ * arbsdp_psd_sqrt -- out <- A^{1/2} for symmetric PD A (POINT MODE).
+ *
+ * Via eigendecomposition: A^{1/2} = Q diag(sqrt(lambda_i)) Q^T.
+ * `out` must be an initialized n x n arb_mat; A must be square (asserted).
+ * out and A may NOT alias.  Returns 0 if A is strictly PD, nonzero otherwise
+ * (see the STRICT-PD GATE banner above).
+ */
+int arbsdp_psd_sqrt(arb_mat_t out, const arb_mat_t A, slong prec);
 
 /*
  * arbsdp_psd_invsqrt -- out <- A^{-1/2} for symmetric PD A (POINT MODE).
  *
- * Via eigendecomposition: A^{-1/2} = Q diag(1/sqrt(max(eps, lambda_i))) Q^T.
- * Eigenvalues are floored at a tiny positive eps before the reciprocal sqrt
- * (matching PsdCone.ts psdInvSqrt, which uses Math.max(1e-300, lambda)) to keep
- * the result finite for a near-singular input.
- *
+ * Via eigendecomposition: A^{-1/2} = Q diag(1/sqrt(lambda_i)) Q^T.
  * `out` must be an initialized n x n arb_mat; A must be square (asserted).
- * out and A may NOT alias.
+ * out and A may NOT alias.  Returns 0 if A is strictly PD, nonzero otherwise
+ * (see the STRICT-PD GATE banner above).
  */
-void arbsdp_psd_invsqrt(arb_mat_t out, const arb_mat_t A, slong prec);
+int arbsdp_psd_invsqrt(arb_mat_t out, const arb_mat_t A, slong prec);
 
 #ifdef __cplusplus
 }

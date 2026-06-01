@@ -111,6 +111,7 @@ test_step_cone(void)
     arb_mat_t X, dX, T;
     arb_t alpha, a;
     int bounded;
+    int cone_ok;   /* b30: arbsdp_psd_max_step strict-PD status (unused asserts) */
     double amid;
 
     arb_mat_init(X, 3, 3);
@@ -123,7 +124,7 @@ test_step_cone(void)
     arb_mat_one(X);
     arb_mat_one(dX);
     arb_mat_neg(dX, dX);
-    bounded = arbsdp_psd_max_step(alpha, X, dX, PREC);
+    bounded = arbsdp_psd_max_step(alpha, X, dX, &cone_ok, PREC);
     CHECK(bounded == 1, "psd_max_step: X=I,dX=-I must be BOUNDED");
     CHECK(close_d(alpha, 1.0, 1e-50), "psd_max_step: X=I,dX=-I => alpha=1");
 
@@ -134,7 +135,7 @@ test_step_cone(void)
     arb_set_si(arb_mat_entry(dX, 0, 0), -1);
     arb_set_si(arb_mat_entry(dX, 1, 1), -3);
     arb_set_si(arb_mat_entry(dX, 2, 2), -2);
-    bounded = arbsdp_psd_max_step(alpha, X, dX, PREC);
+    bounded = arbsdp_psd_max_step(alpha, X, dX, &cone_ok, PREC);
     CHECK(bounded == 1, "psd_max_step: diag must be BOUNDED");
     /* 1.0/3.0 is the closest double to 1/3 (~16 good digits); the arb alpha is
      * accurate to ~prec, so the difference is bounded by the DOUBLE's error ~1e-16.
@@ -166,7 +167,7 @@ test_step_cone(void)
     arb_mat_one(dX);
     amid = -12345.0;
     arb_set_d(alpha, amid);                 /* sentinel; must be left unchanged */
-    bounded = arbsdp_psd_max_step(alpha, X, dX, PREC);
+    bounded = arbsdp_psd_max_step(alpha, X, dX, &cone_ok, PREC);
     CHECK(bounded == 0, "psd_max_step: dX=+I must be UNBOUNDED (wrong-sign guard)");
 
     arb_mat_clear(X);
@@ -244,7 +245,16 @@ test_sigma_clip(void)
 }
 
 /* ------------------------------------------------------------------------- *
- * Test 2b: clip_step safeguard.                                             *
+ * Test 2b: clip_step -- TS Mehrotra accel capped at gamma (b30 WINNER).       *
+ *                                                                            *
+ * FINAL RULE (b30 audition): out = clip(max(0.95*a, 2*a - 1), 0, 0.9999)     *
+ * with cap = ARBSDP_STEP_GAMMA = 0.9999.  The 0.95a/2a-1 is the TS Mehrotra  *
+ * acceleration (HsdeNtSdpSolver.ts:1170); the 0.9999 cap (NOT the old TS     *
+ * 0.999999) is the b30 boundary margin -- it keeps the point-mode iterate    *
+ * STRICTLY interior to the PSD cone so the next NT scaling stays conditioned.*
+ *                                                                            *
+ * MUTATION (CLAUDE.md rule 8): reverting the cap to 0.999999, or dropping    *
+ * the 0.95/2a-1 Mehrotra terms, changes one or two of the values below.      *
  * ------------------------------------------------------------------------- */
 static void
 test_clip_step(void)
@@ -252,21 +262,35 @@ test_clip_step(void)
     arb_t a, out;
     arb_init(a); arb_init(out);
 
-    /* a = 0.5: max(0.95*0.5, 2*0.5-1) = max(0.475, 0) = 0.475.  (0.475/0.98 are
-     *     non-exact doubles -> 1e-12 margin around the double literal.) */
+    /* a = 1.0: max(0.95, 1.0)=1.0 -> capped at 0.9999. */
+    arb_set_d(a, 1.0);
+    arbsdp_clip_step(out, a, PREC);
+    CHECK(close_d(out, 0.9999, 1e-12), "clip_step: a=1.0 -> 0.9999 (cap)");
+
+    /* a = 0.5: max(0.475, 0.0)=0.475 (uncapped). */
     arb_set_d(a, 0.5);
     arbsdp_clip_step(out, a, PREC);
     CHECK(close_d(out, 0.475, 1e-12), "clip_step: a=0.5 -> 0.475");
 
-    /* a = 0.99: max(0.9405, 0.98) = 0.98 (<= cap). */
-    arb_set_d(a, 0.99);
+    /* a = 0.9: max(0.855, 0.8)=0.855 (Mehrotra accel picks 0.95a). */
+    arb_set_d(a, 0.9);
     arbsdp_clip_step(out, a, PREC);
-    CHECK(close_d(out, 0.98, 1e-12), "clip_step: a=0.99 -> 0.98");
+    CHECK(close_d(out, 0.855, 1e-12), "clip_step: a=0.9 -> 0.855");
 
-    /* a = 2.0 (e.g. unbounded clamped large): max(1.9, 3) = 3 -> cap 0.999999. */
+    /* a = 2.0: max(1.9, 3.0)=3.0 -> capped at 0.9999. */
     arb_set_d(a, 2.0);
     arbsdp_clip_step(out, a, PREC);
-    CHECK(close_d(out, 0.999999, 1e-12), "clip_step: large a caps at 0.999999");
+    CHECK(close_d(out, 0.9999, 1e-12), "clip_step: a=2.0 -> 0.9999 (capped)");
+
+    /* a = 1e300 (UNBOUNDED surrogate): capped at 0.9999. */
+    arb_set_d(a, 1e300);
+    arbsdp_clip_step(out, a, PREC);
+    CHECK(close_d(out, 0.9999, 1e-12), "clip_step: a=1e300 (unbounded) -> 0.9999");
+
+    /* a = -0.3 (negative step): max(-0.285, -1.6)=-0.285 -> floored to 0. */
+    arb_set_d(a, -0.3);
+    arbsdp_clip_step(out, a, PREC);
+    CHECK(close_d(out, 0.0, 1e-50), "clip_step: a=-0.3 (negative) -> 0.0");
 
     arb_clear(a); arb_clear(out);
 }
@@ -372,6 +396,56 @@ test_mu_decreases(void)
     /* FACTOR REUSE (Test 4): exactly ONE factor_with_reg invocation. */
     CHECK(d.factor_calls == 1,
           "factor reuse: predictor + corrector must share ONE factor (factor_calls==1)");
+
+    /* STRICT INTERIORITY (b30): the combined step alpha must be the
+     * fraction-to-boundary clip out = max(0, min(1, GAMMA * alpha_raw)), so the
+     * iterate X + alpha*dX (and S, tau, kappa) stay STRICTLY inside the cone --
+     * never ON the boundary (which would break the next NT scaling).  We
+     * recompute alpha_raw EXACTLY the way the solver does (min over psd_max_step
+     * for every X/S block and the tau-kappa ratio; +Inf surrogate otherwise) and
+     * assert  0 < d.alpha <= min(1, GAMMA*alpha_raw) + tiny.
+     *
+     * MUTATION (CLAUDE.md rule 8): reverting GAMMA to ~1.0 (or restoring the
+     * 0.999999 cap) makes d.alpha land at ~alpha_raw, breaking the
+     * d.alpha <= 0.9*alpha_raw + tiny bound below -- this check is the b30 guard. */
+    if (ok) {
+        arb_t alpha_raw, big, v, bound, one, tiny, gamma;
+        int cone_ok;   /* b30: psd_max_step strict-PD status (not asserted here) */
+        arb_init(alpha_raw); arb_init(big); arb_init(v);
+        arb_init(bound); arb_init(one); arb_init(tiny); arb_init(gamma);
+        arb_set_d(big, 1e300);
+        arb_set(alpha_raw, big);
+        for (int b = 0; b < it.nblocks; b++) {
+            if (arbsdp_psd_max_step(v, it.X[b], d.dX[b], &cone_ok, PREC) && arb_lt(v, alpha_raw))
+                arb_set(alpha_raw, v);
+            if (arbsdp_psd_max_step(v, it.S[b], d.dS[b], &cone_ok, PREC) && arb_lt(v, alpha_raw))
+                arb_set(alpha_raw, v);
+        }
+        if (arbsdp_tau_kappa_max_step(v, it.tau, d.dtau, it.kappa, d.dkappa, PREC)
+            && arb_lt(v, alpha_raw))
+            arb_set(alpha_raw, v);
+
+        /* bound = min(1, GAMMA*alpha_raw) + tiny */
+        arb_set_d(gamma, ARBSDP_STEP_GAMMA);
+        arb_mul(bound, gamma, alpha_raw, PREC);
+        arb_one(one);
+        arb_min(bound, bound, one, PREC);
+        arb_set_d(tiny, 1e-40);
+        arb_add(bound, bound, tiny, PREC);
+
+        CHECK(arb_le(d.alpha, bound),
+              "interiority (b30): d.alpha must be <= min(1, 0.9*alpha_raw) + tiny");
+        CHECK(arb_is_positive(d.alpha),
+              "interiority (b30): d.alpha must be strictly positive (a real step)");
+
+        printf("  interiority: alpha_raw = %.6e, GAMMA*raw = %.6e, d.alpha = %.6e\n",
+               arf_get_d(arb_midref(alpha_raw), ARF_RND_NEAR),
+               ARBSDP_STEP_GAMMA * arf_get_d(arb_midref(alpha_raw), ARF_RND_NEAR),
+               arf_get_d(arb_midref(d.alpha), ARF_RND_NEAR));
+
+        arb_clear(alpha_raw); arb_clear(big); arb_clear(v);
+        arb_clear(bound); arb_clear(one); arb_clear(tiny); arb_clear(gamma);
+    }
 
     if (ok) {
         /* take the step:  X += alpha*dX, S += alpha*dS, y += alpha*dy,

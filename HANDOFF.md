@@ -38,6 +38,26 @@ tests)** — in roughly that order.
   because the b30 cone-exit *forces* over-escalation. Fix with b30, then this is the
   controller's accuracy contract.
 
+- **b30 DONE** (cone safety): step rule auditioned EMPIRICALLY on our 7 goldens
+  (the literature default γ=0.9 was wrong for our single-step HSDE — a γ-sweep
+  picked the TS Mehrotra step `max(0.95α,2α−1)` **capped at γ=0.9999**, beating both
+  pure fraction-to-boundary and the old 0.999999) + **fail-loud cone ops** (a
+  strict-PD gate `λ_min > λ_max·2^(-prec/2)` replaces the silent 1e-300 floor;
+  honest NUMERICAL on degradation, rule 5). Result: `trivial_2x2` 1024→512 bits for
+  ~14 digits, all 7 goldens reach target, the p68 false-optimals (trivial/ill_cond)
+  resolved, `test_golden` green (12/12 both build configs).
+- **DIAGNOSIS CORRECTION (important):** the brittleness is **NOT** "the iterate
+  leaves the cone" — at the low-prec NUMs, X and S stay *strictly PD* (e.g.
+  λ_min(X)=9.52, λ_min(S)=1.06e-13 for trivial at prec 256) and the cone kernels are
+  accurate (~1e-54). It is point-mode **precision exhaustion**: the *untrusted* ball
+  RADIUS grows like cond~1/μ (invariant 3) until λ_min's ball straddles zero, so
+  `arb_rsqrt`/`arb_inv` return a NaN midpoint → NUMERICAL → escalate. So the residual
+  bits/digit floor (~19–158 on boundary optima) is precision-fundamental in the
+  current arb-**ball** L0. The real lever is **epic.6** (true-midpoint L0 arithmetic
+  so untrusted radii can't NaN-corrupt midpoints — what rule 1 actually requires).
+  The old b30 acceptance "15 digits at ≤256 bits / 3–6 bits/digit" was written under
+  the misdiagnosis; that target now lives in epic.6.
+
 ## What exists and works
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build

@@ -18,7 +18,7 @@
   "known_gaps": [
     {
       "kind": "efficiency",
-      "bead": "arb-prec-IPM-b30",
+      "bead": "arb-prec-IPM-epic.6",
       "reason": "achieved ~81 bits/digit (final_prec 1024 for 12.7 achieved digits); LP-as-diagonal-block vertex optimum sits on the nonneg-orthant boundary, NUM status at prec 128/256/512 until 1024 reaches OPT."
     }
   ]

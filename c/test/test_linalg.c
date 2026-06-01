@@ -254,12 +254,14 @@ test_psd_sqrt(void)
 {
     for (slong n = 2; n <= 3; n++) {
         arb_mat_t A, R, R2;
+        int st;
         arb_mat_init(A, n, n);
         arb_mat_init(R, n, n);
         arb_mat_init(R2, n, n);
         make_pd(A, n);
 
-        arbsdp_psd_sqrt(R, A, PREC);
+        st = arbsdp_psd_sqrt(R, A, PREC);
+        CHECK(st == 0, "psd_sqrt: well-conditioned PD must return 0 (strictly PD)");
         arb_mat_mul(R2, R, R, PREC);
 
         CHECK(mat_close(R2, A, TOL),
@@ -278,6 +280,7 @@ test_psd_invsqrt(void)
 {
     for (slong n = 2; n <= 3; n++) {
         arb_mat_t A, R, tmp, prod, I;
+        int st;
         arb_mat_init(A, n, n);
         arb_mat_init(R, n, n);
         arb_mat_init(tmp, n, n);
@@ -286,7 +289,8 @@ test_psd_invsqrt(void)
         arb_mat_one(I);
         make_pd(A, n);
 
-        arbsdp_psd_invsqrt(R, A, PREC);
+        st = arbsdp_psd_invsqrt(R, A, PREC);
+        CHECK(st == 0, "psd_invsqrt: well-conditioned PD must return 0 (strictly PD)");
         arb_mat_mul(tmp, R, A, PREC);
         arb_mat_mul(prod, tmp, R, PREC);
 
@@ -299,6 +303,88 @@ test_psd_invsqrt(void)
         arb_mat_clear(tmp);
         arb_mat_clear(prod);
         arb_mat_clear(I);
+    }
+}
+
+/* ----- Test 4b: STRICT-PD GATE (bead arb-prec-IPM-b30, CLAUDE.md rule 5) ----
+ * The cone ops must SIGNAL failure (nonzero return) on a non-PD / singular input
+ * instead of silently flooring it into a huge-but-finite garbage inverse-sqrt.
+ *
+ * RED-GREEN (rule 9): on the old 1e-300-floored implementation arbsdp_psd_invsqrt
+ * returned void and produced a finite garbage matrix, so this test would not even
+ * compile / would never see a nonzero status -> RED.  With the gate it returns
+ * nonzero on a singular or rank-deficient input -> GREEN.
+ *
+ * MUTATION (rule 8): reverting psd_pow_half to the eps=1e-300 floor (so a singular
+ * input is clamped rather than detected) makes the diag(1,0) / rank-1 cases below
+ * return 0, FAILING this test -- proving the singular-detection bites.
+ *
+ * The positive control (a strictly-PD diag(4,9) returning 0 with the exact
+ * inverse-sqrt diag(1/2,1/3)) guards against a gate that rejects everything. */
+static void
+test_strict_pd_gate(void)
+{
+    /* (a) well-conditioned PD diag(4,9): returns 0 and the exact invsqrt
+     * diag(1/2, 1/3). */
+    {
+        arb_mat_t A, R, E;
+        int st;
+        arb_mat_init(A, 2, 2);
+        arb_mat_init(R, 2, 2);
+        arb_mat_init(E, 2, 2);
+        arb_set_si(arb_mat_entry(A, 0, 0), 4);
+        arb_set_si(arb_mat_entry(A, 1, 1), 9);
+        st = arbsdp_psd_invsqrt(R, A, PREC);
+        CHECK(st == 0, "gate: diag(4,9) is strictly PD -> return 0");
+        arb_set_d(arb_mat_entry(E, 0, 0), 0.5);            /* 1/sqrt(4) = 1/2 */
+        arb_set_str(arb_mat_entry(E, 1, 1), "0.333333333333333333333333333333333333333333333333333333333333333", PREC);
+        CHECK(mat_close(R, E, TOL), "gate: invsqrt(diag(4,9)) != diag(1/2,1/3)");
+        arb_mat_clear(A);
+        arb_mat_clear(R);
+        arb_mat_clear(E);
+    }
+
+    /* (b) SINGULAR diag(1,0): lambda_min = 0, not PD -> must SIGNAL (nonzero). */
+    {
+        arb_mat_t A, R;
+        int st;
+        arb_mat_init(A, 2, 2);
+        arb_mat_init(R, 2, 2);
+        arb_set_si(arb_mat_entry(A, 0, 0), 1);
+        /* (1,1) left at 0 */
+        st = arbsdp_psd_invsqrt(R, A, PREC);
+        CHECK(st != 0, "gate: SINGULAR diag(1,0) must SIGNAL failure (nonzero)");
+        arb_mat_clear(A);
+        arb_mat_clear(R);
+    }
+
+    /* (c) RANK-1 [[1,1],[1,1]]: eigenvalues {0, 2}, not PD -> must SIGNAL. */
+    {
+        arb_mat_t A, R;
+        int st;
+        arb_mat_init(A, 2, 2);
+        arb_mat_init(R, 2, 2);
+        arb_set_si(arb_mat_entry(A, 0, 0), 1);
+        arb_set_si(arb_mat_entry(A, 1, 1), 1);
+        set_sym(A, 0, 1, 1);
+        st = arbsdp_psd_invsqrt(R, A, PREC);
+        CHECK(st != 0, "gate: RANK-1 [[1,1],[1,1]] must SIGNAL failure (nonzero)");
+        arb_mat_clear(A);
+        arb_mat_clear(R);
+    }
+
+    /* (d) psd_sqrt of the same singular diag(1,0) also signals (the gate is shared
+     * by both powers; nt_scaling needs sqrt(X) to fail loud too). */
+    {
+        arb_mat_t A, R;
+        int st;
+        arb_mat_init(A, 2, 2);
+        arb_mat_init(R, 2, 2);
+        arb_set_si(arb_mat_entry(A, 0, 0), 1);
+        st = arbsdp_psd_sqrt(R, A, PREC);
+        CHECK(st != 0, "gate: psd_sqrt of SINGULAR diag(1,0) must SIGNAL failure");
+        arb_mat_clear(A);
+        arb_mat_clear(R);
     }
 }
 
@@ -380,6 +466,7 @@ main(void)
     test_eigh_known();
     test_psd_sqrt();
     test_psd_invsqrt();
+    test_strict_pd_gate();
     test_orthogonality();
     test_mutation_sanity();
 

@@ -238,11 +238,23 @@ test_easy_no_overescalation(void)
 
     CHECK(r.status == ARBSDP_ADAPTIVE_OPTIMAL,
           "easy: trivial_2x2 must reach ADAPTIVE_OPTIMAL");
-    /* No over-escalation: converges at the first (prec0) solve. */
-    CHECK(r.prec_history_len == 1,
-          "easy: trivial_2x2 must converge at prec0 (no escalation; history len == 1)");
-    CHECK(r.final_prec == 128,
-          "easy: trivial_2x2 final precision must remain prec0=128");
+    /* HONEST CONVERGENCE (bead b30, p68).  This test previously asserted
+     * "converges at prec0=128, history len == 1".  That rested on a FRAGILE p68
+     * false-positive: the prec=128 soft-optimal snapshot was lifted to OPTIMAL
+     * while its recovered value was only ~3 correct digits ([1.000 +/- 6.4e-4]),
+     * far short of the 10-digit target.  It survived only by bit-exact arb
+     * arithmetic -- any refactor of the cone kernels (here: the b30 strict-PD
+     * gate replacing the silent 1e-300 floor) tips it, and the honest result is
+     * NUMERICAL-then-escalate to a prec that genuinely reaches the target
+     * ([1.000000 +/- 3.1e-7] already at prec=128, tighter than the old "OPTIMAL").
+     * We therefore assert the HONEST contract: reach the target with a SMALL,
+     * BOUNDED escalation (b30's bits/digit cut keeps it to 2 solves: 128->256),
+     * not a bit-fragile one-shot.  Removing the p68 over-claim is exactly the
+     * accuracy-contract work the HANDOFF assigns to p68; b30 forces it here. */
+    CHECK(r.prec_history_len <= 2,
+          "easy: trivial_2x2 must reach the target with <=1 escalation (b30/p68)");
+    CHECK(r.final_prec <= 256,
+          "easy: trivial_2x2 final precision must stay small (<=256) (b30/p68)");
 
     arbsdp_adaptive_result_clear(&r);
     arbsdp_problem_clear(&p);

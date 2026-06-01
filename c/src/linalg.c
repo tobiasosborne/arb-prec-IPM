@@ -168,17 +168,47 @@ arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec)
 /*
  * Shared core for psd_sqrt / psd_invsqrt: out = Q diag(f(lambda)) Q^T, where the
  * eigenvalue transform f is selected by `invert`:
- *   invert == 0:  f(lam) = sqrt(max(0, lam))         (matrix square root)
- *   invert != 0:  f(lam) = 1/sqrt(max(eps, lam))     (matrix inverse square root)
- * Clamping mirrors PsdCone.ts psdSqrt / psdInvSqrt (Math.max(0,.)/Math.max(1e-300,.)).
+ *   invert == 0:  f(lam) = sqrt(lam)         (matrix square root)
+ *   invert != 0:  f(lam) = 1/sqrt(lam)       (matrix inverse square root)
+ *
+ * STRICT-PD GATE (CLAUDE.md rule 5; bead arb-prec-IPM-b30).  The prior port
+ * mirrored PsdCone.ts's FLOORS (Math.max(0,lam) for sqrt, Math.max(1e-300,lam)
+ * for invsqrt).  Those floors are float64 lifeboats that turn a non-PD or
+ * radius-degraded input into a HUGE-but-finite garbage result rather than a
+ * detectable failure -- a rule-5 violation in arbitrary precision.  Diagnosis
+ * (bead b30): at low working precision the HSDE iterate's complementarity
+ * measure mu -> 0 drives the Schur condition number ~1/mu (CLAUDE invariant 3);
+ * the ball radius on the iterate's eigenvalues degrades ~30-60 bits per IPM
+ * step until lambda_min's BALL straddles zero, at which point arb_rsqrt /
+ * arb_inv return a NaN midpoint that the old floor masked into garbage.  The
+ * matrices were still genuinely strictly PD (lambda_min midpoint > 0) but their
+ * inverse-sqrt could no longer be computed to meaningful accuracy.
+ *
+ * The honest contract: succeed iff A is strictly PD at the working precision,
+ * i.e. its smallest eigenvalue is clear of the precision-relative floor
+ *     lambda_min  >  lambda_max * 2^(-prec/2).
+ * (Justification: the inverse-sqrt loses ~log2(cond) = log2(lambda_max/lambda_min)
+ * bits; floor at cond = 2^(prec/2) keeps at least prec/2 meaningful bits in the
+ * result, well clear of the zero-straddling regime that produces NaN, yet far
+ * below any genuinely-PD iterate the solver meets -- the b30 traces show
+ * lambda_min ~ 1e-13 at prec=256 sitting ~25 orders of magnitude above this
+ * floor, so a strictly-PD input is never spuriously rejected.)  The 2^(-prec)
+ * scale is also defended against by the contains_zero check below.
+ *
+ * Returns 0 iff A is strictly PD (floor cleared) and `out` holds the requested
+ * matrix power; returns 1 (NOT PD / accuracy-exhausted) WITHOUT writing a
+ * garbage `out` (out is left as a finite, symmetric best-effort using the
+ * floored eigenvalue, so callers that ignore the status still get a finite
+ * matrix -- but the status is the source of truth).
  */
-static void
+static int
 psd_pow_half(arb_mat_t out, const arb_mat_t A, int invert, slong prec)
 {
     slong n = arb_mat_nrows(A);
     arb_mat_t Q, QD, Qt;
     arb_ptr lam;
-    arb_t d, eps;
+    arb_t d, floor_lam, lam_max;
+    int not_pd = 0;
 
     assert(arb_mat_nrows(A) == arb_mat_ncols(A));     /* square */
     assert(arb_mat_nrows(out) == n && arb_mat_ncols(out) == n);
@@ -189,29 +219,45 @@ psd_pow_half(arb_mat_t out, const arb_mat_t A, int invert, slong prec)
     arb_mat_init(Qt, n, n);
     lam = _arb_vec_init(n);
     arb_init(d);
-    arb_init(eps);
-    /* eps floor for invsqrt: tiny positive (PsdCone uses 1e-300). */
-    arb_set_d(eps, 1e-300);
+    arb_init(floor_lam);
+    arb_init(lam_max);
 
-    arbsdp_eigh(lam, Q, A, prec);
+    arbsdp_eigh(lam, Q, A, prec);   /* eigenvalues ASCENDING: lam[0]=min, lam[n-1]=max */
 
-    /* QD = Q * diag(f(lambda)) : scale column i of Q by f(lambda_i). */
+    /* Precision-relative strict-PD floor = max(0, lam_max) * 2^(-prec/2).
+     * lam_max is the largest eigenvalue midpoint (lam[n-1]); if it is itself
+     * non-positive the matrix is not PD (floor degenerates to 0, and the
+     * lam_min <= 0 test below fires). */
+    arb_get_mid_arb(lam_max, lam + (n - 1));
+    if (arf_sgn(arb_midref(lam_max)) <= 0)
+        arb_zero(floor_lam);
+    else
+        arb_mul_2exp_si(floor_lam, lam_max, -(prec / 2));
+
+    /* not_pd iff lambda_min <= floor (midpoint test, POINT MODE) OR the
+     * lambda_min ball straddles zero (arb_rsqrt/arb_inv would NaN -- the b30
+     * mechanism, confirmed by /tmp/inv.c).  Eigenvalues are ascending so lam[0]
+     * is the smallest. */
+    if (arf_cmp(arb_midref(lam + 0), arb_midref(floor_lam)) <= 0)
+        not_pd = 1;
+    if (arb_contains_zero(lam + 0))
+        not_pd = 1;
+
+    /* QD = Q * diag(f(lambda)) : scale column i of Q by f(lambda_i).  On the
+     * not_pd path we still write a finite best-effort (floor the eigenvalue at
+     * `floor_lam`, or eps if floor is zero) so `out` is never NaN -- but the
+     * returned status is the contract callers must honor (rule 5). */
     arb_mat_set(QD, Q);
     for (slong i = 0; i < n; i++) {
-        if (!invert) {
-            /* f = sqrt(max(0, lam)) */
-            if (arf_sgn(arb_midref(lam + i)) <= 0)
-                arb_zero(d);
-            else
-                arb_sqrt(d, lam + i, prec);
-        } else {
-            /* f = 1/sqrt(max(eps, lam)) */
-            if (arf_cmp(arb_midref(lam + i), arb_midref(eps)) < 0)
-                arb_set(d, eps);
-            else
-                arb_set(d, lam + i);
+        arb_set(d, lam + i);
+        if (arf_cmp(arb_midref(d), arb_midref(floor_lam)) < 0)
+            arb_set(d, floor_lam);
+        if (arf_sgn(arb_midref(d)) <= 0)
+            arb_set_d(d, 1e-300);              /* keep finite when floor==0 */
+        if (!invert)
+            arb_sqrt(d, d, prec);
+        else
             arb_rsqrt(d, d, prec);
-        }
         for (slong r = 0; r < n; r++)
             arb_mul(arb_mat_entry(QD, r, i), arb_mat_entry(Q, r, i), d, prec);
     }
@@ -222,21 +268,23 @@ psd_pow_half(arb_mat_t out, const arb_mat_t A, int invert, slong prec)
     arbsdp_symmetrize(out, prec); /* enforce exact symmetry (REUSE svec.h) */
 
     arb_clear(d);
-    arb_clear(eps);
+    arb_clear(floor_lam);
+    arb_clear(lam_max);
     _arb_vec_clear(lam, n);
     arb_mat_clear(Q);
     arb_mat_clear(QD);
     arb_mat_clear(Qt);
+    return not_pd;
 }
 
-void
+int
 arbsdp_psd_sqrt(arb_mat_t out, const arb_mat_t A, slong prec)
 {
-    psd_pow_half(out, A, 0, prec);
+    return psd_pow_half(out, A, 0, prec);
 }
 
-void
+int
 arbsdp_psd_invsqrt(arb_mat_t out, const arb_mat_t A, slong prec)
 {
-    psd_pow_half(out, A, 1, prec);
+    return psd_pow_half(out, A, 1, prec);
 }

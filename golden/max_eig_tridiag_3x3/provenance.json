@@ -18,7 +18,7 @@
   "known_gaps": [
     {
       "kind": "efficiency",
-      "bead": "arb-prec-IPM-b30",
+      "bead": "arb-prec-IPM-epic.6",
       "reason": "achieved ~75 bits/digit (final_prec 1024 for 13.7 achieved digits); rank-1 projector boundary optimum with irrational 2+sqrt(3), NUM status at prec 128/256/512 until 1024 reaches OPT."
     }
   ]

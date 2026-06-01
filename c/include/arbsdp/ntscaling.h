@@ -38,8 +38,10 @@
  * S; this routine allocates only scoped temporaries that it clears itself.
  * Square / matching-size / no-alias preconditions are asserted (CLAUDE.md rule 5,
  * fail fast).  PD of X and S is assumed by the caller (the IPM keeps the iterate
- * strictly interior); a non-PD input is clamped by the underlying psd_sqrt /
- * psd_invsqrt floors rather than detected here.
+ * strictly interior); a non-PD / accuracy-exhausted input is now DETECTED via the
+ * underlying psd_sqrt / psd_invsqrt strict-PD gate (linalg.h, bead b30) and
+ * propagated as a nonzero return -- the honest cone-exit signal -- instead of
+ * being silently floored into garbage.
  */
 
 #ifndef ARBSDP_NTSCALING_H
@@ -61,10 +63,14 @@ extern "C" {
  * `W` must be an initialized n x n arb_mat; X and S must be square n x n
  * (asserted square, same size).  W must NOT alias X or S.
  *
+ * Returns 0 iff both X and the inner factor X^{1/2} S X^{1/2} are strictly PD at
+ * the working precision (W then holds the scaling); returns nonzero on the honest
+ * cone-exit / accuracy-exhausted signal (W is a finite best-effort, not trusted).
+ *
  * POINT MODE: the result is a midpoint; radii are not trusted (see banner).
  */
-void arbsdp_nt_scaling(arb_mat_t W, const arb_mat_t X, const arb_mat_t S,
-                       slong prec);
+int arbsdp_nt_scaling(arb_mat_t W, const arb_mat_t X, const arb_mat_t S,
+                      slong prec);
 
 #ifdef __cplusplus
 }

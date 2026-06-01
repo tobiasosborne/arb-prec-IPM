@@ -26,11 +26,12 @@
 #include "arbsdp/linalg.h"
 #include "arbsdp/svec.h"
 
-void
+int
 arbsdp_nt_scaling(arb_mat_t W, const arb_mat_t X, const arb_mat_t S, slong prec)
 {
     slong n = arb_mat_nrows(X);
     arb_mat_t Xhalf, inner, innerInvSqrt, tmp;
+    int not_pd = 0;
 
     /* Fail fast (CLAUDE.md rule 5): square, matching size, no aliasing. */
     assert(arb_mat_nrows(X) == arb_mat_ncols(X));     /* X square */
@@ -44,16 +45,21 @@ arbsdp_nt_scaling(arb_mat_t W, const arb_mat_t X, const arb_mat_t S, slong prec)
     arb_mat_init(innerInvSqrt, n, n);
     arb_mat_init(tmp, n, n);
 
-    /* Xhalf = X^{1/2}. */
-    arbsdp_psd_sqrt(Xhalf, X, prec);
+    /* Xhalf = X^{1/2}.  The strict-PD gate (linalg.h, b30) signals if X is not
+     * strictly PD at this precision -- propagate as an honest cone-exit. */
+    if (arbsdp_psd_sqrt(Xhalf, X, prec))
+        not_pd = 1;
 
     /* inner = X^{1/2} S X^{1/2}, symmetrized (PsdCone.ts symmetrize(inner)). */
     arb_mat_mul(tmp, Xhalf, S, prec);
     arb_mat_mul(inner, tmp, Xhalf, prec);
     arbsdp_symmetrize(inner, prec);
 
-    /* innerInvSqrt = (X^{1/2} S X^{1/2})^{-1/2}. */
-    arbsdp_psd_invsqrt(innerInvSqrt, inner, prec);
+    /* innerInvSqrt = (X^{1/2} S X^{1/2})^{-1/2}.  inner is PD iff S is PD (X is
+     * PD by the sqrt above); its gate catches the radius-degraded S that drives
+     * the b30 NaN. */
+    if (arbsdp_psd_invsqrt(innerInvSqrt, inner, prec))
+        not_pd = 1;
 
     /* W = X^{1/2} innerInvSqrt X^{1/2}, symmetrized. */
     arb_mat_mul(tmp, Xhalf, innerInvSqrt, prec);
@@ -64,4 +70,5 @@ arbsdp_nt_scaling(arb_mat_t W, const arb_mat_t X, const arb_mat_t S, slong prec)
     arb_mat_clear(inner);
     arb_mat_clear(innerInvSqrt);
     arb_mat_clear(tmp);
+    return not_pd;
 }

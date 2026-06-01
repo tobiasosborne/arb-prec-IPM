@@ -372,9 +372,20 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
             break;
         }
 
-        /* per-block NT scaling W^b = nt_scaling(X^b, S^b) (MATH_SPEC §3.3). */
-        for (int b = 0; b < it->nblocks; b++)
-            arbsdp_nt_scaling(W[b], it->X[b], it->S[b], prec);
+        /* per-block NT scaling W^b = nt_scaling(X^b, S^b) (MATH_SPEC §3.3).  A
+         * nonzero return is the honest cone-exit / accuracy-exhausted signal
+         * (bead b30): X^b or its inner factor is no longer strictly PD at this
+         * precision -> NUMERICAL (CLAUDE.md rule 5; b16 escalates prec). */
+        {
+            int nt_ok = 1;
+            for (int b = 0; b < it->nblocks; b++)
+                if (arbsdp_nt_scaling(W[b], it->X[b], it->S[b], prec))
+                    nt_ok = 0;
+            if (!nt_ok) {
+                fallback = ARBSDP_SOLVE_NUMERICAL;
+                break;
+            }
+        }
 
         /* Mehrotra predictor-corrector direction + safeguarded alpha.  This
          * assembles + factors (with carried regularization) ONCE and reuses the

@@ -104,34 +104,56 @@ arbsdp_sigma(arb_t out, const arb_t mu_aff, const arb_t mu, slong prec)
     arb_clear(floor_mu);
 }
 
-/* clip_step(a) = clip(max(0.95*a, 2*a - 1), 0, 0.999999)  (:827 + :1168-1172). */
+/*
+ * clip_step(a) -- clip the raw step-to-boundary a (min over all cones of 1/(-lmin)
+ * and the tau/kappa ratios, or a +Inf surrogate ~1e300 when nothing binds) so the
+ * point-mode iterate stays STRICTLY interior to the PSD cone (b30).  The rule is
+ * the TS Mehrotra safeguard CAPPED at the fraction-to-boundary gamma:
+ *     t   = max(0.95*a, 2*a - 1)         (TS acceleration, HsdeNtSdpSolver.ts:1170)
+ *     out = max(0, min(ARBSDP_STEP_GAMMA, t))
+ * The upper cap ARBSDP_STEP_GAMMA = 0.9999 (< 1) keeps the iterate STRICTLY interior
+ * (so the next NT scaling stays conditioned); a negative step is rejected (-> 0).
+ *
+ * b30 EMPIRICAL AUDITION (numbers + decision in the ARBSDP_STEP_GAMMA comment in
+ * direction.h): across the 7 goldens this rule (V3 family) at gamma=0.9999 reached
+ * the target on 7/7 at the lowest mean bits/digit -- the cheapest config that
+ * solved every problem.  This SUPERSEDES the TS 0.999999 cap (HsdeNtSdpSolver.ts
+ * :1170), which landed too close to the boundary and broke the next scaling, and
+ * beats pure fraction-to-boundary (dropping the 0.95/2a-1 accel cost digits on
+ * sdp_sqrt2).  HsdeNtSdpSolver.ts:827, :1168-1172, MATH_SPEC §3.7.
+ */
 void
 arbsdp_clip_step(arb_t out, const arb_t a, slong prec)
 {
-    arb_t t1, t2, lo, hi;
+    arb_t t, mha, mb, hi, zero;
 
-    arb_init(t1);
-    arb_init(t2);
-    arb_init(lo);
+    arb_init(t);
+    arb_init(mha);
+    arb_init(mb);
     arb_init(hi);
+    arb_init(zero);
 
-    /* t1 = 0.95*a ; t2 = 2*a - 1 */
-    arb_set_d(t1, 0.95);
-    arb_mul(t1, t1, a, prec);
-    arb_mul_si(t2, a, 2, prec);
-    arb_sub_si(t2, t2, 1, prec);
-    arb_max(t1, t1, t2, prec);              /* max(0.95a, 2a-1) */
+    arb_zero(zero);
 
-    /* clip to [0, 0.999999] */
-    arb_zero(lo);
-    arb_set_d(hi, 0.999999);
-    arb_max(t1, t1, lo, prec);
-    arb_min(out, t1, hi, prec);
+    /* mha = 0.95 * a */
+    arb_set_d(mha, 0.95);
+    arb_mul(mha, mha, a, prec);
+    /* mb = 2*a - 1 */
+    arb_mul_2exp_si(mb, a, 1);
+    arb_sub_si(mb, mb, 1, prec);
+    /* t = max(0.95*a, 2*a - 1) */
+    arb_max(t, mha, mb, prec);
 
-    arb_clear(t1);
-    arb_clear(t2);
-    arb_clear(lo);
+    /* out = max(0, min(ARBSDP_STEP_GAMMA, t)) */
+    arb_set_d(hi, ARBSDP_STEP_GAMMA);
+    arb_min(t, t, hi, prec);
+    arb_max(out, t, zero, prec);
+
+    arb_clear(t);
+    arb_clear(mha);
+    arb_clear(mb);
     arb_clear(hi);
+    arb_clear(zero);
 }
 
 /* ========================================================================= *
@@ -144,10 +166,26 @@ arbsdp_clip_step(arb_t out, const arb_t a, slong prec)
  * X^{-1/2}) which has the SAME spectrum (B^{-1} = X^{-1/2}, and X^{-1/2} dX X^{-1/2}
  * = (X^{-1/2}) dX (X^{-1/2})^T is similar to L^{-1} dX L^{-T} by congruence; both
  * equal the generalized eigenvalues of (dX, X)).  alpha = lmin>=0 ? Inf : 1/(-lmin).
+ *
+ * STRICT-PD GATE (bead b30): `*ok` (out) is the honest cone-op trust flag.  It is
+ * set to 0 -- and the caller must abort the step -> NUMERICAL -- IFF X itself is
+ * not strictly PD at this precision, i.e. the arbsdp_psd_invsqrt strict-PD gate
+ * fires (X^{-1/2} would be silent garbage, poisoning the whole congruent map M
+ * and every quantity downstream).  This is the genuine corruption case.
+ *
+ * A NON-FINITE 1/(-lmin) (the boundary eigenvalue's ball straddling zero once the
+ * radius degrades near mu->0) is NOT treated as corruption: it means this block
+ * imposes NO reliable finite step bound at this precision, so it is reported as
+ * UNBOUNDED (return 0) -- the caller's min() then ignores it, exactly as a real
+ * +Inf bound.  (b30 diagnosis: the iterate stays genuinely strictly PD; the NaN
+ * the old code produced came from the radius-degraded Schur/scalar path, not from
+ * a non-PD matrix.  Promoting an indeterminate step-bound to a global failure
+ * spuriously killed mixed_blocks / sdp_sqrt2's last good step at prec=256, while
+ * the matrix gate above is the principled "no silent garbage" fix per rule 5.)
  */
 int
 arbsdp_psd_max_step(arb_t alpha_out, const arb_mat_t X, const arb_mat_t dX,
-                    slong prec)
+                    int *ok, slong prec)
 {
     slong n = arb_mat_nrows(X);
     arb_mat_t Xinvh, tmp, M, Q;
@@ -156,6 +194,7 @@ arbsdp_psd_max_step(arb_t alpha_out, const arb_mat_t X, const arb_mat_t dX,
 
     assert(arb_mat_nrows(X) == arb_mat_ncols(X));
     assert(arb_mat_nrows(dX) == n && arb_mat_ncols(dX) == n);
+    assert(ok != NULL);
 
     arb_mat_init(Xinvh, n, n);
     arb_mat_init(tmp, n, n);
@@ -163,21 +202,24 @@ arbsdp_psd_max_step(arb_t alpha_out, const arb_mat_t X, const arb_mat_t dX,
     arb_mat_init(Q, n, n);
     lam = _arb_vec_init(n);
 
-    /* M = X^{-1/2} dX X^{-1/2}  (symmetric; congruent to L^{-1} dX L^{-T}). */
-    arbsdp_psd_invsqrt(Xinvh, X, prec);
+    /* M = X^{-1/2} dX X^{-1/2}  (symmetric; congruent to L^{-1} dX L^{-T}).
+     * The invsqrt strict-PD gate signals a non-PD / accuracy-exhausted X -- the
+     * one honest corruption case that must abort the step (CLAUDE.md rule 5). */
+    *ok = !arbsdp_psd_invsqrt(Xinvh, X, prec);
     arb_mat_mul(tmp, Xinvh, dX, prec);
     arb_mat_mul(M, tmp, Xinvh, prec);
     arbsdp_symmetrize(M, prec);
 
     arbsdp_eigh(lam, Q, M, prec);            /* ascending; lam[0] = lmin */
 
-    /* lmin >= 0 -> UNBOUNDED (return 0); else alpha = 1/(-lmin). */
+    /* lmin >= 0 -> UNBOUNDED; else alpha = 1/(-lmin).  A non-finite reciprocal
+     * (zero-straddling lmin ball) is reported UNBOUNDED, not as a failure. */
     if (arf_sgn(arb_midref(lam + 0)) >= 0) {
         bounded = 0;
     } else {
         arb_neg(alpha_out, lam + 0);         /* -lmin (> 0) */
         arb_inv(alpha_out, alpha_out, prec); /* 1 / (-lmin) */
-        bounded = 1;
+        bounded = arb_is_finite(alpha_out) ? 1 : 0;
     }
 
     _arb_vec_clear(lam, n);
@@ -729,14 +771,24 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
      * ------------------------------------------------------------------- */
     {
         arb_t alpha_aff;
+        int cone_ok = 1, c;
         arb_init(alpha_aff);
         arb_set_d(big, 1e300);
         arb_set(alpha_aff, big);             /* start at +Inf surrogate */
         for (int b = 0; b < nb; b++) {
-            if (arbsdp_psd_max_step(v, it->X[b], dXaff[b], prec) && arb_lt(v, alpha_aff))
+            if (arbsdp_psd_max_step(v, it->X[b], dXaff[b], &c, prec) && arb_lt(v, alpha_aff))
                 arb_set(alpha_aff, v);
-            if (arbsdp_psd_max_step(v, it->S[b], dSaff[b], prec) && arb_lt(v, alpha_aff))
+            cone_ok &= c;
+            if (arbsdp_psd_max_step(v, it->S[b], dSaff[b], &c, prec) && arb_lt(v, alpha_aff))
                 arb_set(alpha_aff, v);
+            cone_ok &= c;
+        }
+        /* honest cone-exit (bead b30): a non-PD / accuracy-exhausted block makes
+         * the affine step (hence mu_aff and sigma) meaningless -> NUMERICAL. */
+        if (!cone_ok) {
+            arb_clear(alpha_aff);
+            ok = 0;
+            goto cleanup;
         }
         if (arbsdp_tau_kappa_max_step(v, it->tau, dtau_aff, it->kappa, dkap_aff, prec)
             && arb_lt(v, alpha_aff))
@@ -898,11 +950,21 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
      * ------------------------------------------------------------------- */
     arb_set_d(big, 1e300);
     arb_set(alpha_raw, big);
-    for (int b = 0; b < nb; b++) {
-        if (arbsdp_psd_max_step(v, it->X[b], d->dX[b], prec) && arb_lt(v, alpha_raw))
-            arb_set(alpha_raw, v);
-        if (arbsdp_psd_max_step(v, it->S[b], d->dS[b], prec) && arb_lt(v, alpha_raw))
-            arb_set(alpha_raw, v);
+    {
+        int cone_ok = 1, c;
+        for (int b = 0; b < nb; b++) {
+            if (arbsdp_psd_max_step(v, it->X[b], d->dX[b], &c, prec) && arb_lt(v, alpha_raw))
+                arb_set(alpha_raw, v);
+            cone_ok &= c;
+            if (arbsdp_psd_max_step(v, it->S[b], d->dS[b], &c, prec) && arb_lt(v, alpha_raw))
+                arb_set(alpha_raw, v);
+            cone_ok &= c;
+        }
+        /* honest cone-exit (bead b30): an untrustworthy cone op -> NUMERICAL. */
+        if (!cone_ok) {
+            ok = 0;
+            goto cleanup;
+        }
     }
     if (arbsdp_tau_kappa_max_step(v, it->tau, d->dtau, it->kappa, d->dkappa, prec)
         && arb_lt(v, alpha_raw))

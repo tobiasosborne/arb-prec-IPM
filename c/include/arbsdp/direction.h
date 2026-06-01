@@ -85,6 +85,18 @@ extern "C" {
  * ---------------------------------------------------------------------- */
 
 /*
+ * ARBSDP_STEP_GAMMA -- the fraction-to-boundary CAP on the Mehrotra step (the
+ * upper clip in arbsdp_clip_step).  Chosen by the b30 empirical audition over the
+ * 7 goldens: the V3 family (TS Mehrotra accel max(0.95a, 2a-1) capped at gamma)
+ * beat pure fraction-to-boundary and beat the old TS 0.999999 cap; within V3,
+ * gamma in {0.99 .. 0.9999} is the knee and 0.9999 is the lowest mean bits/digit
+ * that still reaches every calibrated target (7/7).  (SDPA-GMP defaults to 0.9,
+ * but for a different step structure.)  cap < 1 keeps the point-mode iterate
+ * STRICTLY interior to the PSD cone, so the next NT scaling stays conditioned.
+ */
+#define ARBSDP_STEP_GAMMA 0.9999
+
+/*
  * arbsdp_sigma -- the Mehrotra centering parameter
  *     sigma = clip( (mu_aff / max(mu, 1e-300))^3 , 1e-8, 0.9 )
  * (HsdeNtSdpSolver.ts:694-695, MATH_SPEC §3.6).  All operands are POINT-mode
@@ -94,10 +106,18 @@ extern "C" {
 void arbsdp_sigma(arb_t out, const arb_t mu_aff, const arb_t mu, slong prec);
 
 /*
- * arbsdp_clip_step -- the Mehrotra step safeguard applied to a RAW max-step a:
- *     clip( max(0.95*a, 2*a - 1), 0, 0.999999 )
- * (HsdeNtSdpSolver.ts:827 + clipStep :1168-1172, MATH_SPEC §3.7).  `out` and `a`
- * are initialized arb_t (POINT mode).
+ * arbsdp_clip_step -- the step clip applied to a RAW max-step a (= alpha to the
+ * cone boundary, or a +Inf surrogate ~1e300 when no cone binds).  The final rule
+ * is the TS Mehrotra safeguard CAPPED at the fraction-to-boundary gamma:
+ *     out = clip( max(0.95*a, 2*a - 1), 0, ARBSDP_STEP_GAMMA )
+ *         = max( 0, min( ARBSDP_STEP_GAMMA, max(0.95*a, 2*a - 1) ) ).
+ * The max(0.95a, 2a-1) is the TS acceleration; the upper clip at ARBSDP_STEP_GAMMA
+ * = 0.9999 (< 1) keeps the iterate STRICTLY interior to the PSD cone (b30), so the
+ * next NT scaling (symmetric eig -- Arb's weak axis) stays well-conditioned; a
+ * negative step is rejected (-> 0).  `out` and `a` are initialized arb_t (POINT
+ * mode).  HsdeNtSdpSolver.ts:827, :1168-1172, MATH_SPEC §3.7; the b30 audition
+ * fixed the cap at 0.9999, superseding the TS 0.999999 (HsdeNtSdpSolver.ts:1170)
+ * which landed too close to the boundary and broke the next scaling.
  */
 void arbsdp_clip_step(arb_t out, const arb_t a, slong prec);
 
@@ -117,13 +137,22 @@ void arbsdp_clip_step(arb_t out, const arb_t a, slong prec);
  * for all alpha >= 0), in which case `alpha_out` is left unchanged.  Caller treats
  * a 0 return as +Infinity in the min().
  *
+ * STRICT-PD GATE (bead b30): `*ok` (out, must be non-NULL) is set to 1 iff the
+ * cone op is trustworthy, and 0 ONLY on the genuine corruption case -- X is not
+ * strictly PD at this precision (the arbsdp_psd_invsqrt strict-PD gate fires, so
+ * X^{-1/2} is silent garbage).  On *ok==0 the caller MUST abort the step
+ * (CLAUDE.md rule 5): arbsdp_direction_compute returns 0 -> the solver's
+ * NUMERICAL fallback.  A merely UNBOUNDED step (lmin >= 0, or a zero-straddling
+ * lmin ball whose 1/(-lmin) is non-finite at this precision) is reported via the
+ * return value (0 = unbounded), NOT via *ok -- it means "no finite bound from
+ * this block", which the caller's min() correctly ignores.  This replaces the
+ * prior silent 1e-300 floor in the underlying invsqrt.
+ *
  * `alpha_out` is an initialized arb_t; X and dX are square n x n (asserted same
- * size).  X must be PD (the IPM keeps the iterate strictly interior); the
- * invsqrt floors a near-singular X (CLAUDE.md rule 5 boundary is the caller's).
- * POINT MODE: alpha_out is a midpoint; radii not trusted.
+ * size).  POINT MODE: alpha_out is a midpoint; radii not trusted.
  */
 int arbsdp_psd_max_step(arb_t alpha_out, const arb_mat_t X, const arb_mat_t dX,
-                        slong prec);
+                        int *ok, slong prec);
 
 /*
  * arbsdp_tau_kappa_max_step -- maximum alpha >= 0 keeping tau + alpha*dtau >= 0
