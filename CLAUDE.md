@@ -26,7 +26,7 @@ README.md         <-- public-facing intro.
 
 External ground truth (cite these in source, see rule 3):
 - **Jansson, Chaykin, Keil**, "Rigorous error bounds for the optimal value in
-  semidefinite programming", *SIAM J. Optim.* 2007 — the Layer-1 bound formulas.
+  semidefinite programming", *SIAM J. Numer. Anal.* 46(1):180-200, 2007 — the Layer-1 bound formulas.
 - **Todd, Toh, Tütüncü**, "On the Nesterov–Todd direction in SDP", 1998 — the NT
   scaling for Layer 0.
 - **Andersen–Roos–Terlaky** 2003 — the homogeneous self-dual embedding.

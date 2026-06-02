@@ -129,9 +129,16 @@ containing the optimum for tr-bounded goldens. Remaining, roughly by value:
    `[1, 3]` for max_eigenvalue_2x2 where p*=3). A small dual-feasibility correction
    (project y_ext to make Z_ext PSD) or interval-Newton/Krawczyk closes the gap to a
    tight two-sided certificate. The bracket is RIGOROUS today; this makes it TIGHT.
-2. **arb-prec-IPM-om9 (P1, rigor):** verify the trace-bound convention (no JCK `s_b`
-   block-dimension factor) end-to-end and add a multi-element-block (`n_b>=2`),
-   negative-`d_b` bracket-contains-optimum test before trusting non-LP-block brackets.
+2. **arb-prec-IPM-om9 (P1, rigor) — DONE 2026-06-02.** Trace-bound convention (no JCK
+   `s_b` factor) re-verified against JCK 2007 directly (MATH_SPEC §5.3.1 "om9
+   reconfirmation": JCK's `s_b` is Loewner-only; our trace form is `tr(DX) >=
+   min(0,lambda_min(D))*xbar`, no factor) and CLAUDE.md citation corrected
+   (`SIAM J. Numer. Anal.` 46(1):180-200). All 7 rigor-gate goldens audited: each `xbar`
+   is an EXACT trace bound (trace pinned by diagonal equality constraints). New
+   `test_trace_vs_loewner` discriminator (full-rank `X*=I`, n_b=2, opt=2): TRACE xbar=2
+   brackets opt exactly; LOEWNER xbar=1 EXCLUDES (lb=2+2^-10, ub=2-2^-10). Mutation check
+   (rule 9): a spurious `s_b` factor fails 4/6 assertions while rank-1 goldens stay green.
+   14/14 ctest normal + ASan (zero leaks).
 3. **arb-prec-IPM-9kg (P2):** a sign-discriminating golden so the bracket gate itself
    catches a `y_ext` sign regression (current max-eig goldens give symmetric
    `[-opt,+opt]` brackets that still contain opt under a wrong sign).

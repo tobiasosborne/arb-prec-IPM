@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>     /* unlink (POSIX; mkstemp lives in <stdlib.h>)         */
 
 #include <flint/arb.h>
 #include <flint/arb_mat.h>
@@ -225,14 +226,26 @@ typedef struct {
 static void
 test_rigor_gate(const golden_case *cases, int n)
 {
+    /* xbar CONVENTION: every entry below is a verified TRACE bound, xbar_b >=
+     * tr(X*_b) (NOT a Loewner / lambda_max bound) -- bead om9, MATH_SPEC §5.3.1.
+     * Audit of each .dat-s confirmed each block's trace is PINNED by diagonal
+     * EQUALITY constraints, so xbar_b == tr(X*_b) exactly (the trace is an
+     * equality, hence both an upper and lower bound on tr).  Because these are
+     * trace bounds, the no-s_b-factor Jansson penalty (MATH_SPEC §5.3.1, om9
+     * reconfirmation) is safe: there is no spurious block-dimension factor.
+     * Per-row justification (the constraint that pins the block trace):
+     *   max_eig_*           A_1 = I_n (all diag entries 1), b_1=1 => tr(X_1)=1.
+     *   separable_12block   block c: A_c = I_2 on block c, b_c=1  => tr(X_c)=1.
+     *   two_block_corr_coupled  diag equalities fix X_b(1,1)=1 and X_b(2,2)=2
+     *                       => tr(X_b)=1+2=3 (blk0: constr 1,2; blk1: constr 3,4). */
     static const gate_case gcs[] = {
-        { "max_eigenvalue_2x2",     1,  "1", 1, NULL, NULL },
-        { "max_eig_tridiag_3x3",    1,  "1", 1, NULL, NULL },
-        { "max_eig_path_4",         1,  "1", 1, NULL, NULL },
-        { "max_eig_path_8",         1,  "1", 1, NULL, NULL },
-        { "max_eig_path_16",        1,  "1", 1, NULL, NULL },
-        { "separable_12block",     12,  "1", 1, NULL, NULL },
-        { "two_block_corr_coupled", 2, NULL, 0, "3",  "3"  },
+        { "max_eigenvalue_2x2",     1,  "1", 1, NULL, NULL }, /* tr(X)=1: A_1=I_2, b=1 */
+        { "max_eig_tridiag_3x3",    1,  "1", 1, NULL, NULL }, /* tr(X)=1: A_1=I_3, b=1 */
+        { "max_eig_path_4",         1,  "1", 1, NULL, NULL }, /* tr(X)=1: A_1=I_4, b=1 */
+        { "max_eig_path_8",         1,  "1", 1, NULL, NULL }, /* tr(X)=1: A_1=I_8, b=1 */
+        { "max_eig_path_16",        1,  "1", 1, NULL, NULL }, /* tr(X)=1: A_1=I_16, b=1 */
+        { "separable_12block",     12,  "1", 1, NULL, NULL }, /* tr(X_c)=1/blk: A_c=I_2, b_c=1 */
+        { "two_block_corr_coupled", 2, NULL, 0, "3",  "3"  }, /* tr(X_b)=3: diag eqs X(1,1)=1,X(2,2)=2 */
     };
     int ngc = (int) (sizeof gcs / sizeof gcs[0]);
 
@@ -521,6 +534,180 @@ test_sign_selftest(const golden_case *cases, int n)
     arbsdp_problem_clear(&p);
 }
 
+/* ==========================================================================
+ * Step 9: TRACE-vs-LOEWNER DISCRIMINATOR (bead arb-prec-IPM-om9).
+ *
+ * Proves the a-priori bound `xbar_b` is consumed as a TRACE bound (xbar >= tr X)
+ * and NOT a Loewner / lambda_max bound, and that there is NO spurious
+ * block-dimension factor s_b on the penalty term (certify.h / MATH_SPEC §5.3.1).
+ *
+ * The existing goldens cannot make this distinction: their optima are RANK-1, so
+ * tr(X*) == lambda_max(X*) and the two conventions coincide.  This test uses a
+ * FULL-RANK optimum where they split.
+ *
+ * Constructed problem (built in a tmpfile, parsed via the real read_sdpa path):
+ *     max <I, X>  s.t.  X11 = 1,  X22 = 1,  X12 = 0   (2x2 block, m=3)
+ * The three constraints pin the UNIQUE feasible point X* = I, so
+ *     tr(X*)        = 2   (the TRACE bound),
+ *     lambda_max(X*)= 1   (the LOEWNER bound),
+ *     opt = <I,I>   = 2.
+ *
+ * We call arbsdp_lower_bound / arbsdp_upper_bound DIRECTLY with synthetic y_ext
+ * (no solver), with eps = 2^-10:
+ *
+ * LOWER side, y_ext = (1+eps, 1+eps, 0):  Z = -eps*I, dlo <= -eps,
+ *     b^T y_ext = 2 + 2eps,  lb(xbar) = (2+2eps) + min(0,dlo)*xbar.
+ *   xbar = 2 (TRACE):  lb ~= 2     -> R1 lb <= opt, R2 lb > opt-eps (no s_b factor)
+ *   xbar = 1 (LOEWNER):lb ~= 2+eps -> B1 lb > opt   (trace bound is NECESSARY)
+ *
+ * UPPER side, y_ext = (1-eps, 1-eps, 0):  Z = +eps*I, dhi >= +eps,
+ *     b^T y_ext = 2 - 2eps,  ub(xbar) = (2-2eps) + max(0,dhi)*xbar.
+ *   xbar = 2 (TRACE):  ub ~= 2     -> R3 opt <= ub, R4 ub < opt+eps (no s_b factor)
+ *   xbar = 1 (LOEWNER):ub ~= 2-eps -> B2 ub < opt   (trace bound is NECESSARY)
+ *
+ * A spurious block-dimension factor (s_b = 2 here) on the penalty would push the
+ * trace-bound endpoints to lb ~= 2-2eps < opt-eps (fails R2) / ub ~= 2+2eps >
+ * opt+eps (fails R4) -- which is exactly what R2/R4 catch.  (The trace bisection
+ * tolerance ~2^-128 << eps = 2^-10 is negligible in every comparison.)
+ * ======================================================================== */
+static void
+test_trace_vs_loewner(void)
+{
+    /* The discriminator .dat-s (see the function banner for the line-by-line
+     * decoding): m=3, nblocks=1, block-size "2", b="1 1 0"; C=I; A_1=diag(1,0);
+     * A_2=diag(0,1); A_3=offdiag[[0,1],[1,0]]. */
+    static const char *dats =
+        "* trace_vs_loewner_2x2 (om9 discriminator): max <I,X> s.t. X11=1, X22=1, X12=0\n"
+        "* unique feasible X*=I (full rank): tr(X*)=2 (TRACE bound), lambda_max(X*)=1 (LOEWNER bound), opt=2\n"
+        "3\n"
+        "1\n"
+        "2\n"
+        "1 1 0\n"
+        "0 1 1 1 1\n"
+        "0 1 2 2 1\n"
+        "1 1 1 1 1\n"
+        "2 1 2 2 1\n"
+        "3 1 1 2 1\n";
+
+    const slong prec = 256;
+
+    char path[] = "/tmp/arbsdp_tvl_XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0, "tvl: mkstemp temp .dat-s");
+    if (fd < 0)
+        return;
+    {
+        FILE *f = fdopen(fd, "w");
+        if (f == NULL) {
+            CHECK(0, "tvl: fdopen temp .dat-s");
+            close(fd);
+            unlink(path);
+            return;
+        }
+        fputs(dats, f);
+        fclose(f);
+    }
+
+    arbsdp_problem p;
+    arbsdp_problem_init(&p);
+    CHECK(arbsdp_read_sdpa(&p, path) == 0, "tvl: read_sdpa discriminator");
+    CHECK(p.m == 3, "tvl: m == 3");
+    CHECK(p.nblocks == 1, "tvl: nblocks == 1");
+
+    /* eps = 2^-10, opt = 2. */
+    arb_t eps, opt, opt_m_eps, opt_p_eps;
+    arb_init(eps); arb_init(opt); arb_init(opt_m_eps); arb_init(opt_p_eps);
+    arb_set_si(eps, 1);
+    arb_mul_2exp_si(eps, eps, -10);            /* eps = 2^-10 */
+    arb_set_si(opt, 2);                         /* opt = 2 */
+    arb_sub(opt_m_eps, opt, eps, prec);        /* opt - eps */
+    arb_add(opt_p_eps, opt, eps, prec);        /* opt + eps */
+
+    /* a-priori bounds: one with xbar = 2 (TRACE), one with xbar = 1 (LOEWNER). */
+    arbsdp_apriori ab_trace, ab_loewner;
+    arbsdp_apriori_init(&ab_trace, 1);
+    arbsdp_apriori_init(&ab_loewner, 1);
+    {
+        arb_t two, one;
+        arb_init(two); arb_init(one);
+        arb_set_si(two, 2);
+        arb_set_si(one, 1);
+        arbsdp_apriori_set_xbar(&ab_trace,   0, two);
+        arbsdp_apriori_set_xbar(&ab_loewner, 0, one);
+        arb_clear(two); arb_clear(one);
+    }
+
+    /* y vectors (length m=3): y_lo = (1+eps,1+eps,0), y_hi = (1-eps,1-eps,0). */
+    arb_ptr y_lo = _arb_vec_init(3);
+    arb_ptr y_hi = _arb_vec_init(3);
+    {
+        arb_t one_p, one_m;
+        arb_init(one_p); arb_init(one_m);
+        arb_add_si(one_p, eps,  1, prec);      /* 1 + eps */
+        arb_sub_si(one_m, eps,  1, prec);      /* eps - 1 */
+        arb_neg(one_m, one_m);                 /* 1 - eps */
+        arb_set(y_lo + 0, one_p); arb_set(y_lo + 1, one_p); arb_zero(y_lo + 2);
+        arb_set(y_hi + 0, one_m); arb_set(y_hi + 1, one_m); arb_zero(y_hi + 2);
+        arb_clear(one_p); arb_clear(one_m);
+    }
+
+    /* ---- LOWER-bound side (y_lo). ---- */
+    arb_t lb_trace, lb_loewner;
+    arb_init(lb_trace); arb_init(lb_loewner);
+    arbsdp_lower_bound(lb_trace,   &p, y_lo, &ab_trace,   prec);   /* xbar = 2 */
+    arbsdp_lower_bound(lb_loewner, &p, y_lo, &ab_loewner, prec);   /* xbar = 1 */
+
+    /* ---- UPPER-bound side (y_hi). ---- */
+    arb_t ub_trace, ub_loewner;
+    arb_init(ub_trace); arb_init(ub_loewner);
+    arbsdp_upper_bound(ub_trace,   &p, y_hi, &ab_trace,   prec);   /* xbar = 2 */
+    arbsdp_upper_bound(ub_loewner, &p, y_hi, &ab_loewner, prec);   /* xbar = 1 */
+
+    /* Concrete diagnostics (CLAUDE.md rule 11; ~30 digits to stderr). */
+    fprintf(stderr,
+            "\nTRACE-vs-LOEWNER (om9): opt=2, eps=2^-10; full-rank X*=I "
+            "(tr=2, lambda_max=1)\n");
+    {
+        char *s;
+        s = arb_get_str(lb_trace,   30, ARB_STR_NO_RADIUS);
+        fprintf(stderr, "  LOWER xbar=2(TRACE)   lb=%s  (expect ~2, in (opt-eps, opt])\n", s);
+        flint_free(s);
+        s = arb_get_str(lb_loewner, 30, ARB_STR_NO_RADIUS);
+        fprintf(stderr, "  LOWER xbar=1(LOEWNER) lb=%s  (expect ~2+eps > opt -> bites)\n", s);
+        flint_free(s);
+        s = arb_get_str(ub_trace,   30, ARB_STR_NO_RADIUS);
+        fprintf(stderr, "  UPPER xbar=2(TRACE)   ub=%s  (expect ~2, in [opt, opt+eps))\n", s);
+        flint_free(s);
+        s = arb_get_str(ub_loewner, 30, ARB_STR_NO_RADIUS);
+        fprintf(stderr, "  UPPER xbar=1(LOEWNER) ub=%s  (expect ~2-eps < opt -> bites)\n", s);
+        flint_free(s);
+    }
+
+    /* ---- The six discriminating assertions (DO NOT WEAKEN; CLAUDE rule 2/8). ---- */
+    /* R1/R2: trace bound is RIGOROUS and has NO spurious s_b factor on lb. */
+    CHECK(arb_le(lb_trace, opt),         "tvl: lb(trace) <= opt");
+    CHECK(arb_gt(lb_trace, opt_m_eps),   "tvl: lb(trace) > opt-eps (no s_b factor on lb)");
+    /* B1: the Loewner value (xbar=1) over-shoots opt -> the trace bound is necessary. */
+    CHECK(arb_gt(lb_loewner, opt),       "tvl: lb(Loewner) > opt -> trace bound is necessary");
+
+    /* R3/R4: trace bound is RIGOROUS and has NO spurious s_b factor on ub. */
+    CHECK(arb_le(opt, ub_trace),         "tvl: opt <= ub(trace)");
+    CHECK(arb_lt(ub_trace, opt_p_eps),   "tvl: ub(trace) < opt+eps (no s_b factor on ub)");
+    /* B2: the Loewner value (xbar=1) under-shoots opt -> the trace bound is necessary. */
+    CHECK(arb_lt(ub_loewner, opt),       "tvl: ub(Loewner) < opt -> trace bound is necessary");
+
+    /* ---- cleanup (CLAUDE.md rule 7): scalars, y vectors, apriori, problem. ---- */
+    arb_clear(lb_trace); arb_clear(lb_loewner);
+    arb_clear(ub_trace); arb_clear(ub_loewner);
+    arb_clear(eps); arb_clear(opt); arb_clear(opt_m_eps); arb_clear(opt_p_eps);
+    _arb_vec_clear(y_lo, 3);
+    _arb_vec_clear(y_hi, 3);
+    arbsdp_apriori_clear(&ab_trace);
+    arbsdp_apriori_clear(&ab_loewner);
+    arbsdp_problem_clear(&p);
+    unlink(path);
+}
+
 int main(void)
 {
     golden_case cases[MAX_CASES];
@@ -535,6 +722,7 @@ int main(void)
     test_rigor_gate(cases, n);
     test_honest_infinity(cases, n);
     test_sign_selftest(cases, n);
+    test_trace_vs_loewner();
 
     if (failures == 0) {
         printf("\ntest_certify_bracket: ALL PASS\n");

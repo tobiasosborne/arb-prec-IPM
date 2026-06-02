@@ -651,8 +651,33 @@ Jansson-Chaykin-Keil 2007 (Thm 3.2 / Lemma 3.1) carry a block-dimension factor
 `x_bar_trace = s_b * x_bar_Loewner`.  **BINDING for b18/b19:** the a-priori-bound
 API and every golden MUST supply `x_bar_b` as a TRACE bound -- supplying a Loewner /
 lambda_max bound without the `s_b` factor would over-state lb and could EXCLUDE the
-optimum (P0, CLAUDE rule 2).  Tracked + to be re-verified against JCK 2007 directly
-during the b18 assembly: bead arb-prec-IPM-om9.
+optimum (P0, CLAUDE rule 2).  Re-verified against JCK 2007 directly and guarded by a
+convention-discriminating bracket test (full-rank optimum, `n_b>=2`): bead
+arb-prec-IPM-om9, DONE 2026-06-02; see the om9 reconfirmation below.
+
+**om9 reconfirmation (primary source, 2026-06-02).** Re-verified directly against
+Jansson-Chaykin-Keil 2007 (SIAM J. Numer. Anal. 46(1):180-200): their Lemma 3.1 and
+Thm 3.2 (eq. 3.7) use a LOEWNER a-priori bound lambda_max(X_j) <= x_j and carry the
+block-dimension factor s_j: lb = b^T y + sum_j s_j * min(0,d_j) * x_j.  The s_j
+arises in the Lemma 3.1 proof because <D,X> = sum_{k=1..s_j} lambda_k(D) * q_k^T X q_k
+and each of the s_j terms is bounded below by min(0,lambda_min(D)) * lambda_max(X) <=
+min(0,lambda_min(D)) * x_j, summing to s_j copies.  VSDP 2020 confirms the lambda_max
+convention for its primal a-priori input.  Our §5.4 uses a TRACE bound xbar_j >= tr(X_j);
+since tr(DX) >= lambda_min(D)*tr(X) directly (no per-eigenvalue split), the factor does
+NOT appear.  The two are equivalent under xbar_trace = s_j * x_Loewner.  CONCLUSION:
+§5.4 with NO s_b factor is correct iff the supplied xbar is a TRACE bound; supplying a
+Loewner/lambda_max bound as xbar (without multiplying by s_b) would over-state lb and
+could EXCLUDE the optimum (P0, CLAUDE rule 2).  The certify.h apriori API documents xbar
+as a trace bound; a convention-discriminating bracket test (full-rank optimum, n_b>=2)
+guards it.  IMPLEMENTED: `test_trace_vs_loewner` in c/test/test_certify_bracket.c builds
+max <I,X> s.t. X11=X22=1, X12=0 (unique X*=I: tr=2, lambda_max=1, opt=2) and feeds
+synthetic y_ext with eps=2^-10 to arbsdp_lower_bound / arbsdp_upper_bound: with the TRACE
+bound xbar=2 the bracket endpoints land at exactly opt=2 (rigorous, tight), while the
+LOEWNER value xbar=1 yields lb=2+2^-10 > opt and ub=2-2^-10 < opt (EXCLUDES) -- so the
+trace convention is necessary and there is no s_b factor.  Mutation check (CLAUDE rule 9):
+injecting a spurious *s_b factor into arbsdp_lower_bound/upper_bound fails 4 of the 6
+assertions while the rank-1 rigor-gate goldens (tr == lambda_max) stay green, confirming
+the discriminator catches what the existing goldens cannot.
 
 **Scope.** b17 implements only `arbsdp_verified_psd`, `arbsdp_gershgorin_lower_bound`,
 and `arbsdp_lambda_min_lower_bound` (returns `d_b`).  The lb/ub ASSEMBLY and the
