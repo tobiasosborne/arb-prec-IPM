@@ -47,6 +47,7 @@
 #include <flint/arb_mat.h>
 
 #include "arbsdp/problem.h"
+#include "arbsdp/iterate.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -189,6 +190,124 @@ void arbsdp_apriori_set_xbar(arbsdp_apriori *ab, int b, const arb_t value);
 
 /* arbsdp_apriori_set_ybar -- set ybar = value and ybar_set = 1 (copies value). */
 void arbsdp_apriori_set_ybar(arbsdp_apriori *ab, const arb_t value);
+
+/* ==========================================================================
+ * The rigorous two-sided bracket [lb, ub] (bead arb-prec-IPM-b19)
+ * ==========================================================================
+ * THIS IS THE PROJECT'S PRODUCT (CLAUDE.md "What this is"): the first rigorous
+ * interval certificate that PROVABLY CONTAINS the SDP optimum
+ *     p*_ext = max <C_file, X>  s.t.  <A_i,X> = b_i,  X >= 0.
+ * Everything below runs in Arb *ball* arithmetic at the certification precision
+ * prec_c and produces THEOREMS (CLAUDE.md rule 1, invariant 2; the only rigor
+ * source is the verified-Cholesky-shift lambda bound, never eigendecomposition).
+ *
+ * MATH_SPEC §5.4 (lower bound, Jansson-Chaykin-Keil 2007 Thm 3.2) and §5.5
+ * (upper bound UB-A, its dual-side trace-mirror).  Both consume the SAME external
+ * dual y_ext = -y_int (y_int = it->y / it->tau) and the SAME file-sign data
+ * (C_file, A_i) via arbsdp_dual_residual; passing y_int (the WRONG sign) forms
+ * Z_int = -Z_ext, swaps lambda_min<->lambda_max, and yields a bracket that
+ * EXCLUDES the optimum (P0; §5.5 "Sign contract").
+ */
+
+/*
+ * arbsdp_lambda_max_upper_bound -- rigorous UPPER bound dhi on lambda_max(A) via
+ * lambda_max(A) = -lambda_min(-A) (MATH_SPEC §5.5):
+ *
+ *     dhi = -arbsdp_lambda_min_lower_bound(-A) >= lambda_max(A).
+ *
+ * GUARANTEE (THEOREM, CLAUDE.md rule 2): dhi >= lambda_max(A).  A successful ball
+ * Cholesky of (-A - s*I) proves lambda_min(-A) >= s, i.e. lambda_max(A) <= -s;
+ * the b17 kernel returns the largest such s as d_lo(-A), so dhi = -d_lo(-A) is a
+ * rigorous upper bound (Rump 2006 Cor 2.4; FLINT arb_mat_cho contract).  A is
+ * square (asserted); `out` must be initialized.  prec is the working precision.
+ */
+void arbsdp_lambda_max_upper_bound(arb_t out, const arb_mat_t A, slong prec);
+
+/*
+ * arbsdp_lower_bound -- the Jansson lower bound (MATH_SPEC §5.4) for the EXTERNAL
+ * max problem, assembled in ball arithmetic:
+ *
+ *     lb = b^T y_ext + sum_b min(0, dlo_b) * xbar_b,
+ *
+ * with dlo_b = arbsdp_lambda_min_lower_bound(Z_ext^b) <= lambda_min(Z_ext^b),
+ * Z_ext^b = arbsdp_dual_residual(., p, y_ext, prec) = C_file^b - sum_i (y_ext)_i A_i^b.
+ *
+ * HONEST -inf (CLAUDE.md invariant 5, rule 2): if for some block dlo_b < 0 AND
+ * xbar_set[b] == 0 (no a-priori trace bound supplied), lb = -inf (arb set to
+ * negative infinity) -- NEVER a fabricated finite bound.
+ *
+ * `lb` is the assembled ball (the caller takes its LOWER endpoint for the
+ * rigorous scalar; arbsdp_certify_bracket does this).  `y_ext` is the external
+ * dual (length p->m), ALREADY tau-purified and negated by the caller -- this
+ * routine is the §5.4 ASSEMBLY and does not re-derive the sign.  `ab` supplies
+ * the xbar trace bounds + set flags.  All arguments non-NULL; ab->nblocks must
+ * equal p->nblocks (asserted).  prec is the certification precision prec_c.
+ */
+void arbsdp_lower_bound(arb_t lb, const arbsdp_problem *p, arb_srcptr y_ext,
+                        const arbsdp_apriori *ab, slong prec);
+
+/*
+ * arbsdp_upper_bound -- the dual-side UPPER bound (MATH_SPEC §5.5, UB-A) for the
+ * EXTERNAL max problem, assembled in ball arithmetic:
+ *
+ *     ub = b^T y_ext + sum_b max(0, dhi_b) * xbar_b,
+ *
+ * with dhi_b = arbsdp_lambda_max_upper_bound(Z_ext^b) >= lambda_max(Z_ext^b),
+ * Z_ext^b as in arbsdp_lower_bound (SAME y_ext, SAME file-sign data).
+ *
+ * HONEST +inf (CLAUDE.md invariant 5, rule 2): if for some block dhi_b > 0 AND
+ * xbar_set[b] == 0, ub = +inf -- NEVER a fabricated finite bound.  The clamp
+ * max(0, dhi_b) (mirroring min(0, dlo_b) for the lower bound) is the safe
+ * over-estimate of <Z_b, X_b> when Z_b is negative definite.
+ *
+ * `ub` is the assembled ball (the caller takes its UPPER endpoint).  Arguments,
+ * sign contract, and asserts as arbsdp_lower_bound.
+ */
+void arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
+                        const arbsdp_apriori *ab, slong prec);
+
+/*
+ * arbsdp_certify_status -- the Layer-1 status of a bracket (MATH_SPEC §5.6, the
+ * finiteness subset; the gap <= tol "optimal" refinement is Layer-2).
+ */
+typedef enum {
+    ARBSDP_CERTIFY_OPTIMAL_BRACKET = 1, /* both lb, ub finite: a rigorous bracket  */
+    ARBSDP_CERTIFY_INCONCLUSIVE    = 2  /* lb=-inf or ub=+inf, or tau unhealthy     */
+} arbsdp_certify_status;
+
+/*
+ * arbsdp_certify_bracket -- THE PRODUCT (bead arb-prec-IPM-b19): the rigorous
+ * two-sided certificate [lb, ub] for the external max problem (MATH_SPEC §5.4 +
+ * §5.5).  Returns a status; fills lb, ub.
+ *
+ * GUARANTEE (THEOREM, CLAUDE.md rule 2): lb <= p*_ext <= ub.  lb is taken at the
+ * Arb LOWER endpoint and ub at the Arb UPPER endpoint of the assembled balls, so
+ * the scalar interval [lb, ub] rigorously contains the optimum even after all
+ * ball rounding.  A bracket that EVER excludes a known optimum is a P0 bug.
+ *
+ * THE P0 SIGN LOCUS (computed in EXACTLY ONE place here): the external dual is
+ *     y_ext[i] = -( it->y[i] / it->tau )                       (tau-purify, THEN negate)
+ * formed once into a scratch vector and passed to BOTH arbsdp_lower_bound and
+ * arbsdp_upper_bound (MATH_SPEC §5.5 sign contract).
+ *
+ * TAU GUARD (CLAUDE.md rule 5): if it->tau < TAU_HEALTHY (1e-6, the solve.c
+ * convergence threshold) the iterate is on the HSDE infeasibility path (bead
+ * b20), not a usable approximate optimum -- this routine does NOT purify/certify;
+ * it returns ARBSDP_CERTIFY_INCONCLUSIVE with lb=-inf, ub=+inf.
+ *
+ * STATUS: ARBSDP_CERTIFY_OPTIMAL_BRACKET iff both lb, ub are finite; otherwise
+ * ARBSDP_CERTIFY_INCONCLUSIVE (an infinite side or an unhealthy tau).
+ *
+ * Memory (CLAUDE.md rule 7): `lb`, `ub` are caller-init'd outputs; the scratch
+ * y_ext vector and the assembled balls are scoped here and cleared.  p, it, ab
+ * non-NULL; ab->nblocks == p->nblocks == it->nblocks (asserted).  prec_c is the
+ * certification precision (the caller passes final_prec + 128; MATH_SPEC §10).
+ */
+arbsdp_certify_status arbsdp_certify_bracket(arb_t lb, arb_t ub,
+                                             const arbsdp_problem *p,
+                                             const arbsdp_iterate *it,
+                                             const arbsdp_apriori *ab,
+                                             slong prec_c);
 
 #ifdef __cplusplus
 }

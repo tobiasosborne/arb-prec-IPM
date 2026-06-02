@@ -19,7 +19,15 @@
 
 #include "arbsdp/certify.h"
 #include "arbsdp/problem.h"
+#include "arbsdp/iterate.h"
 #include "arbsdp/svec.h"
+
+/* TAU_HEALTHY: the HSDE convergence threshold below which (tau, kappa) carry an
+ * infeasibility certificate (b20), NOT a usable approximate optimum.  Kept in
+ * lockstep with ARBSDP_TAU_HEALTHY in c/src/solve.c (the 6-flag convergence test,
+ * solve.c:298); not exposed in a header, so mirrored here with this note (b19
+ * TAU GUARD, certify.h).  If solve.c's value changes, change this too. */
+#define ARBSDP_CERTIFY_TAU_HEALTHY 1e-6
 
 /* ---------------------------------------------------------------------------
  * arbsdp_verified_psd
@@ -525,4 +533,321 @@ arbsdp_apriori_set_ybar(arbsdp_apriori *ab, const arb_t value)
 
     arb_set(ab->ybar, value);
     ab->ybar_set = 1;
+}
+
+/* ===========================================================================
+ * The rigorous two-sided bracket [lb, ub] (bead arb-prec-IPM-b19).
+ * MATH_SPEC §5.4 (lower) + §5.5 (upper, UB-A).  THE PROJECT'S PRODUCT.
+ *
+ * All BALL arithmetic (CLAUDE.md rule 1, invariant 2): a THEOREM about the true
+ * optimum p*_ext = max <C_file, X>.  Memory (rule 7): scoped temporaries cleared.
+ * ======================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_lambda_max_upper_bound -- rigorous upper bound dhi >= lambda_max(A) via
+ * lambda_max(A) = -lambda_min(-A) (MATH_SPEC §5.5; certify.h contract).
+ *
+ * A successful ball Cholesky of (-A - s*I) proves lambda_min(-A) >= s, i.e.
+ * lambda_max(A) <= -s; the b17 kernel returns the largest such s as d_lo(-A), so
+ * out = -d_lo(-A) >= lambda_max(A) is a THEOREM (Rump 2006 Cor 2.4).  We negate A
+ * into a scratch matrix (NOT in place -- A is const), run the shipped b17 kernel,
+ * and negate its result.
+ * ------------------------------------------------------------------------- */
+void
+arbsdp_lambda_max_upper_bound(arb_t out, const arb_mat_t A, slong prec)
+{
+    slong n = arb_mat_nrows(A);
+    arb_mat_t negA;
+    arb_t dlo;
+
+    assert(arb_mat_nrows(A) == arb_mat_ncols(A)
+           && "lambda_max_upper: A must be square");
+
+    arb_mat_init(negA, n, n);
+    arb_init(dlo);
+
+    arb_mat_neg(negA, A);                          /* negA = -A (rigorous) */
+    arbsdp_lambda_min_lower_bound(dlo, negA, prec);/* dlo <= lambda_min(-A) */
+    arb_neg(out, dlo);                             /* out = -dlo >= lambda_max(A) */
+
+    arb_mat_clear(negA);
+    arb_clear(dlo);
+}
+
+/* ---------------------------------------------------------------------------
+ * assemble_bty -- out <- b^T y_ext in BALL arithmetic (rigorous enclosure).
+ *
+ * b is materialized from the problem (FILE sign; arbsdp_problem_b) and the dot
+ * product is accumulated with arb_dot (one rounding for the whole length-m sum,
+ * the tightest rigorous enclosure FLINT offers).  m may be 0 (-> out = 0).
+ * ------------------------------------------------------------------------- */
+static void
+assemble_bty(arb_t out, const arbsdp_problem *p, arb_srcptr y_ext, slong prec)
+{
+    int m = p->m;
+    if (m == 0) {
+        arb_zero(out);
+        return;
+    }
+    {
+        arb_ptr bvec = _arb_vec_init(m);
+        for (int i = 0; i < m; i++) {
+            int rc = arbsdp_problem_b(&bvec[i], p, i, prec);
+            assert(rc == 0 && "assemble_bty: b_i failed to parse");
+            (void) rc;
+        }
+        /* out = sum_i b[i] * y_ext[i], one rounding (arb_dot, subtract = 0). */
+        arb_dot(out, NULL, 0, bvec, 1, y_ext, 1, m, prec);
+        _arb_vec_clear(bvec, m);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_lower_bound -- Jansson lower bound (MATH_SPEC §5.4):
+ *     lb = b^T y_ext + sum_b min(0, dlo_b) * xbar_b,   dlo_b <= lambda_min(Z_ext^b).
+ *
+ * HONEST -inf (CLAUDE.md invariant 5): a block with dlo_b < 0 AND xbar_set[b]==0
+ * makes lb = -inf (that block's tr(X_b) is a-priori unbounded so its penalty is
+ * unbounded below).  A block with dlo_b >= 0 contributes 0 regardless of xbar
+ * (min(0,dlo_b) = 0), so an UNSET xbar there is harmless -- only a NEGATIVE
+ * dlo_b needs a finite xbar.  Z_ext is built once for all blocks via
+ * arbsdp_dual_residual (SAME y_ext as the upper bound; §5.5 sign contract).
+ * ------------------------------------------------------------------------- */
+void
+arbsdp_lower_bound(arb_t lb, const arbsdp_problem *p, arb_srcptr y_ext,
+                   const arbsdp_apriori *ab, slong prec)
+{
+    int nb;
+
+    assert(p != NULL && ab != NULL && "lower_bound: p, ab non-NULL");
+    assert(ab->nblocks == p->nblocks && "lower_bound: ab->nblocks != p->nblocks");
+
+    nb = p->nblocks;
+
+    /* Z_ext^b = C_file^b - sum_i (y_ext)_i A_i^b (ball; arbsdp_dual_residual).
+     * Z is an array of nb arb_mat_t -- the established convention (iterate.c R_d,
+     * test_certify.c): flint_malloc(nb * sizeof *Z), arb_mat_init(Z[b], ..). */
+    {
+        arb_mat_t *Z = flint_malloc((size_t) nb * sizeof *Z);
+        arb_t acc;     /* running b^T y_ext + sum_b min(0,dlo_b)*xbar_b */
+        arb_t dlo;     /* dlo_b <= lambda_min(Z_ext^b) */
+        arb_t term;    /* min(0,dlo_b) * xbar_b */
+        arb_t zero;
+        int is_neg_inf = 0;
+
+        for (int b = 0; b < nb; b++) {
+            slong sz = p->block_sizes[b] < 0 ? -p->block_sizes[b]
+                                             : p->block_sizes[b];
+            arb_mat_init(Z[b], sz, sz);
+        }
+        arbsdp_dual_residual(Z, p, y_ext, prec);
+
+        arb_init(acc);
+        arb_init(dlo);
+        arb_init(term);
+        arb_init(zero);
+        arb_zero(zero);
+
+        assemble_bty(acc, p, y_ext, prec);         /* acc <- b^T y_ext */
+
+        for (int b = 0; b < nb && !is_neg_inf; b++) {
+            arbsdp_lambda_min_lower_bound(dlo, Z[b], prec);
+            /* term = min(0, dlo_b). */
+            arb_min(term, dlo, zero, prec);
+            if (!arb_is_zero(term)) {
+                /* a strictly-negative penalty: needs a finite a-priori xbar. */
+                if (!ab->xbar_set[b]) {
+                    is_neg_inf = 1;                 /* HONEST -inf (invariant 5) */
+                    break;
+                }
+                arb_mul(term, term, &ab->xbar[b], prec);
+                arb_add(acc, acc, term, prec);
+            }
+            /* dlo_b >= 0 -> min(0,dlo_b) = 0 -> no contribution, no xbar needed. */
+        }
+
+        if (is_neg_inf)
+            arb_neg_inf(lb);
+        else
+            arb_set(lb, acc);
+
+        for (int b = 0; b < nb; b++)
+            arb_mat_clear(Z[b]);
+        flint_free(Z);
+        arb_clear(acc);
+        arb_clear(dlo);
+        arb_clear(term);
+        arb_clear(zero);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_upper_bound -- dual-side upper bound (MATH_SPEC §5.5, UB-A):
+ *     ub = b^T y_ext + sum_b max(0, dhi_b) * xbar_b,   dhi_b >= lambda_max(Z_ext^b).
+ *
+ * Exact dual-side MIRROR of arbsdp_lower_bound (SAME y_ext, SAME Z_ext): swap
+ * lambda_min -> lambda_max (via arbsdp_lambda_max_upper_bound), min(0,.) ->
+ * max(0,.), and -inf -> +inf for the honest unbounded case.
+ * ------------------------------------------------------------------------- */
+void
+arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
+                   const arbsdp_apriori *ab, slong prec)
+{
+    int nb;
+
+    assert(p != NULL && ab != NULL && "upper_bound: p, ab non-NULL");
+    assert(ab->nblocks == p->nblocks && "upper_bound: ab->nblocks != p->nblocks");
+
+    nb = p->nblocks;
+
+    {
+        arb_mat_t *Z = flint_malloc((size_t) nb * sizeof *Z);
+        arb_t acc;
+        arb_t dhi;     /* dhi_b >= lambda_max(Z_ext^b) */
+        arb_t term;    /* max(0,dhi_b) * xbar_b */
+        arb_t zero;
+        int is_pos_inf = 0;
+
+        for (int b = 0; b < nb; b++) {
+            slong sz = p->block_sizes[b] < 0 ? -p->block_sizes[b]
+                                             : p->block_sizes[b];
+            arb_mat_init(Z[b], sz, sz);
+        }
+        arbsdp_dual_residual(Z, p, y_ext, prec);
+
+        arb_init(acc);
+        arb_init(dhi);
+        arb_init(term);
+        arb_init(zero);
+        arb_zero(zero);
+
+        assemble_bty(acc, p, y_ext, prec);         /* acc <- b^T y_ext */
+
+        for (int b = 0; b < nb && !is_pos_inf; b++) {
+            arbsdp_lambda_max_upper_bound(dhi, Z[b], prec);
+            /* term = max(0, dhi_b). */
+            arb_max(term, dhi, zero, prec);
+            if (!arb_is_zero(term)) {
+                if (!ab->xbar_set[b]) {
+                    is_pos_inf = 1;                 /* HONEST +inf (invariant 5) */
+                    break;
+                }
+                arb_mul(term, term, &ab->xbar[b], prec);
+                arb_add(acc, acc, term, prec);
+            }
+        }
+
+        if (is_pos_inf)
+            arb_pos_inf(ub);
+        else
+            arb_set(ub, acc);
+
+        for (int b = 0; b < nb; b++)
+            arb_mat_clear(Z[b]);
+        flint_free(Z);
+        arb_clear(acc);
+        arb_clear(dhi);
+        arb_clear(term);
+        arb_clear(zero);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_certify_bracket -- THE PRODUCT (bead arb-prec-IPM-b19): the rigorous
+ * [lb, ub] with lb <= p*_ext <= ub (MATH_SPEC §5.4 + §5.5).  certify.h contract.
+ *
+ * THE P0 SIGN LOCUS (ONE place): y_ext[i] = -( it->y[i] / it->tau ).  Tau-purify
+ * (divide by tau), THEN negate (the iterate carries the internal-min dual y_int =
+ * tau * y_int_unpurified; the external max problem's dual is y_ext = -y_int).
+ * This single y_ext feeds BOTH the lower and upper bound (§5.5 sign contract).
+ *
+ * TAU GUARD (CLAUDE.md rule 5): tau < TAU_HEALTHY -> infeasibility path (b20),
+ * not a usable optimum -> INCONCLUSIVE with [-inf, +inf], no purify/certify.
+ *
+ * lb is taken at the ball's LOWER endpoint and ub at its UPPER endpoint, so the
+ * SCALAR interval [lb, ub] rigorously contains p*_ext even after ball rounding.
+ * ------------------------------------------------------------------------- */
+arbsdp_certify_status
+arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
+                       const arbsdp_iterate *it, const arbsdp_apriori *ab,
+                       slong prec_c)
+{
+    int m;
+    arb_ptr y_ext;
+    arb_t lb_ball, ub_ball;
+    arf_t lo, hi;
+    arbsdp_certify_status status;
+
+    assert(p != NULL && it != NULL && ab != NULL
+           && "certify_bracket: p, it, ab non-NULL");
+    assert(ab->nblocks == p->nblocks
+           && "certify_bracket: ab->nblocks != p->nblocks");
+    assert(it->nblocks == p->nblocks
+           && "certify_bracket: it->nblocks != p->nblocks");
+    assert(it->m == p->m && "certify_bracket: it->m != p->m");
+
+    /* TAU GUARD (rule 5): an unhealthy tau means the HSDE iterate is on the
+     * infeasibility path (b20), not an approximate optimum.  Do NOT purify or
+     * certify -- return INCONCLUSIVE with the honest [-inf, +inf].
+     *
+     * Take tau's MIDPOINT into a local arb first (the convergence.c arb_to_d
+     * idiom) rather than arb_midref(it->tau) directly: the latter aliases the
+     * iterate field as an arf_struct view and trips a GCC -O2 -Wstringop-overread
+     * false positive when arb_div later reads the full arb_struct from it->tau. */
+    {
+        arb_t tau_mid;
+        double tau_d;
+        arb_init(tau_mid);
+        arb_get_mid_arb(tau_mid, it->tau);
+        tau_d = arf_get_d(arb_midref(tau_mid), ARF_RND_DOWN);
+        arb_clear(tau_mid);
+        if (!(tau_d >= ARBSDP_CERTIFY_TAU_HEALTHY)) {  /* NaN-safe (NaN -> guard) */
+            arb_neg_inf(lb);
+            arb_pos_inf(ub);
+            return ARBSDP_CERTIFY_INCONCLUSIVE;
+        }
+    }
+
+    m = p->m;
+
+    /* --- THE P0 SIGN LOCUS: y_ext = -(it->y / it->tau), formed ONCE. --------- */
+    y_ext = NULL;
+    if (m > 0) {
+        y_ext = _arb_vec_init(m);
+        for (int i = 0; i < m; i++) {
+            /* element-pointer form (vec + i), as in FLINT's own _arb_vec code,
+             * to keep -Wstringop-overread (a known -O2 false positive on the
+             * &vec[i] form for arb_ptr) quiet without suppressing the warning. */
+            arb_div(y_ext + i, it->y + i, it->tau, prec_c); /* y_int = y / tau */
+            arb_neg(y_ext + i, y_ext + i);                  /* y_ext = -y_int  */
+        }
+    }
+
+    arb_init(lb_ball);
+    arb_init(ub_ball);
+
+    arbsdp_lower_bound(lb_ball, p, y_ext, ab, prec_c);
+    arbsdp_upper_bound(ub_ball, p, y_ext, ab, prec_c);
+
+    /* Take lb at the LOWER endpoint and ub at the UPPER endpoint of the assembled
+     * balls (the rigorous scalar interval).  arf +/-inf flows through verbatim. */
+    arf_init(lo);
+    arf_init(hi);
+    arb_get_lbound_arf(lo, lb_ball, prec_c);
+    arb_get_ubound_arf(hi, ub_ball, prec_c);
+    arb_set_arf(lb, lo);
+    arb_set_arf(ub, hi);
+    arf_clear(lo);
+    arf_clear(hi);
+
+    status = (arb_is_finite(lb) && arb_is_finite(ub))
+                 ? ARBSDP_CERTIFY_OPTIMAL_BRACKET
+                 : ARBSDP_CERTIFY_INCONCLUSIVE;
+
+    arb_clear(lb_ball);
+    arb_clear(ub_ball);
+    if (m > 0)
+        _arb_vec_clear(y_ext, m);
+
+    return status;
 }

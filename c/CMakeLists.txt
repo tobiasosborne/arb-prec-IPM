@@ -276,3 +276,26 @@ target_compile_definitions(test_golden
 target_link_libraries(test_golden PRIVATE arbsdp m)
 
 add_test(NAME test_golden COMMAND test_golden)
+
+# The rigorous bracket gate (bead arb-prec-IPM-b19): THE PRODUCT.  Solves each
+# golden, certifies [lb,ub] in ball arithmetic (certify.c), and asserts the
+# 65-digit analytic optimum is inside (RIGOR; a bracket that excludes opt is P0).
+# Reuses golden_provenance.c (like test_golden) for the per-case optimal_value;
+# absolute GOLDEN_DIR; test/ include path for golden_provenance.h; libm for log10.
+add_executable(test_certify_bracket test/test_certify_bracket.c test/golden_provenance.c)
+
+target_include_directories(test_certify_bracket
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test
+)
+
+target_compile_definitions(test_certify_bracket
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+target_link_libraries(test_certify_bracket PRIVATE arbsdp m)
+
+add_test(NAME test_certify_bracket COMMAND test_certify_bracket)
