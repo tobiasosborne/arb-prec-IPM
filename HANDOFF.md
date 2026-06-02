@@ -36,6 +36,16 @@ start Layer-1 work until the Layer-0 approximate solver is correct and performan
 - **epic.6 DONE** (2026-06-02): true-midpoint Layer-0 arithmetic via
   **radius-clearing** (`iterate_clear_radii` in `c/src/solve.c`). See the diagnosis
   correction below.
+- **LAYER 1 — THE PRODUCT — FIRST RIGOROUS BRACKET SHIPPED (2026-06-02):** the
+  certification chain was un-deferred (epic.6 met the correct+performant trigger) and
+  built: **b27** (λ_min-bound audition → MATH_SPEC §5.3.1: verified-Cholesky shift
+  beats eig/Weyl/Newton), **b17** (`certify.c`: `arbsdp_verified_psd`,
+  `arbsdp_gershgorin_lower_bound`, `arbsdp_lambda_min_lower_bound` — `d <= λ_min` as a
+  theorem via bisection on `arb_mat_cho(A-sI)`), **b18** (`arbsdp_dual_residual` ball
+  enclosure + `arbsdp_apriori` xbar/ybar API + MATH_SPEC §5.5 upper-bound derivation
+  = the dual-side MIRROR, xbar-only), **b19** (`arbsdp_certify_bracket` → rigorous
+  `[lb,ub]`). RIGOR GATE PASS: `lb <= opt <= ub` for 7 tr-bounded goldens; ub tight to
+  56–191 digits, lb loose (single-dual). 14/14 ctest normal + ASan. All pushed.
 
 ## Current state (2026-06-02)
 
@@ -110,17 +120,31 @@ a correctness issue.
 
 ## Prioritized work plan (current)
 
-1. **arb-prec-IPM-wdz (P1):** reduce residual bits/digit from 32–38 in the hardest
-   cases. Levers: b31 warm-start escalation (skip doomed cold-restart solves) + p68
-   precision-controller accuracy contract (prec floor from target_digits).
-2. **b31 (P1):** warm-start escalation + skip doomed precisions. Measure wall-ms /
-   sum-iters before vs after with `bench/brittle_probe.c`.
-3. **b32 (P1):** bits-per-digit efficiency regression harness (currently eff=PASS
-   after epic.6 dropped values below ratchet thresholds; harness should be tightened
-   toward the 8 b/d goal as wdz/b31 close the gap).
-4. **Layer-1 chain (un-defer when Layer 0 is performant):** b27→b17→b18→b19→b20
-   (currently `deferred`). Trigger: wdz/b31 land and the efficiency profile is
-   acceptable. Then un-defer and begin the certification chain.
+Layer 1 (the product) is un-deferred and its **first rigorous bracket shipped**
+(b27→b17→b18→b19 done). `arbsdp_certify_bracket` returns a rigorous `[lb,ub]`
+containing the optimum for tr-bounded goldens. Remaining, roughly by value:
+
+1. **Tighten `lb` (highest-value Layer-1 step; Layer-2 / dual correction, bead b24):**
+   the upper bound is tight at the converged dual but the lower bound is loose (e.g.
+   `[1, 3]` for max_eigenvalue_2x2 where p*=3). A small dual-feasibility correction
+   (project y_ext to make Z_ext PSD) or interval-Newton/Krawczyk closes the gap to a
+   tight two-sided certificate. The bracket is RIGOROUS today; this makes it TIGHT.
+2. **arb-prec-IPM-om9 (P1, rigor):** verify the trace-bound convention (no JCK `s_b`
+   block-dimension factor) end-to-end and add a multi-element-block (`n_b>=2`),
+   negative-`d_b` bracket-contains-optimum test before trusting non-LP-block brackets.
+3. **arb-prec-IPM-9kg (P2):** a sign-discriminating golden so the bracket gate itself
+   catches a `y_ext` sign regression (current max-eig goldens give symmetric
+   `[-opt,+opt]` brackets that still contain opt under a wrong sign).
+4. **b20 (P1, verified Farkas):** primal/dual-infeasibility certificates from
+   `(tau,kappa)`. BLOCKED on **epic.2** (infeasible/unbounded goldens) — build epic.2
+   first. (`tau < TAU_HEALTHY` already routes to INCONCLUSIVE in `certify_bracket`.)
+5. **b21 (P2): CLI `arbsdp solve` + JSON serializer** — expose the bracket through the
+   public ABI/CLI so the product is usable end to end.
+6. **Performance track (P1, parallel):** **wdz** (residual bits/digit 32–38 from Schur
+   conditioning + controller granularity), **b31** (warm-start / skip-doomed solves),
+   **b32** (efficiency regression harness).
+7. **arb-prec-IPM-9tm (P3):** UB-B residual upper bound (ybar + primal PSD projection)
+   for problems with a known dual bound but no finite trace bound.
 
 ## How to work here (non-negotiable — see CLAUDE.md)
 
@@ -157,4 +181,6 @@ gcc bench/brittle_probe.c -o /tmp/bp -I c/include -L c/build -larbsdp -lflint -l
   still match to working precision.
 - b31: measurably fewer solves/iters/wall-ms to the same accuracy.
 - b32: an efficiency + robustness suite that fails on today's code and passes after.
-Then the solver is correct + performant, and Layer 1 (un-defer b27, b17–b20) begins.
+Layer 1 has since BEGUN and shipped its first rigorous bracket (b27→b17→b18→b19,
+2026-06-02; see the Layer-1 entry above). Next: tighten `lb` (b24 / dual
+correction), b20 (verified Farkas, needs epic.2), b21 (CLI/public ABI).
