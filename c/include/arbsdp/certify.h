@@ -267,6 +267,57 @@ void arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
                         const arbsdp_apriori *ab, slong prec);
 
 /*
+ * arbsdp_primal_lower_bound -- a rigorous PRIMAL lower bound on the EXTERNAL max
+ * optimum via the Rayleigh quotient of a FEASIBLE rank-1 primal point (bead
+ * arb-prec-IPM-vry).  This is the PRIMAL MIRROR of arbsdp_lower_bound (which is
+ * the DUAL-residual Jansson bound): a feasible PRIMAL point gives a lower bound;
+ * a feasible DUAL point gives an upper bound -- here we exhibit a feasible primal.
+ *
+ * METHOD.  For the single-block, single-trace-constraint external problem
+ *     max <C,X>  s.t.  <I,X> = tr(X) = b_1,  X >= 0,
+ * the optimum is b_1 * lambda_max(C).  For ANY vector v != 0,
+ *     X_hat = b_1 * v v^T / (v^T v)
+ * is EXACTLY feasible: it is PSD (a rank-1 outer product, PSD by construction --
+ * no Cholesky needed) and tr(X_hat) = b_1 * (v^T v)/(v^T v) = b_1.  Its objective
+ *     <C, X_hat> = b_1 * (v^T C v)/(v^T v) = b_1 * R(v),  R(v) = (v^T C v)/(v^T v)
+ * the Rayleigh quotient, and R(v) <= lambda_max(C) for EVERY v.  Hence
+ *     lb := b_1 * (v^T C v)/(v^T v)
+ * (at its lower endpoint) is a rigorous LOWER bound on the optimum, for ANY v.
+ * It is TIGHT when v approximates the top eigenvector of C.
+ *
+ * RIGOR (CLAUDE.md rule 2, invariant 2): the quotient is evaluated in Arb *ball*
+ * arithmetic, so lb is a true enclosure and lb's lower endpoint <= opt REGARDLESS
+ * of solve quality -- the bound holds for ANY fixed v.  CRUCIALLY this needs NO
+ * eigenvalue rigor and NO PSD certification of X: the rank-1 construction is PSD
+ * by construction, which is exactly why it works at the PSD boundary where a
+ * verified Cholesky of X FAILS (project invariant 1).  The eigenvector v is
+ * chosen POINT-MODE / approximately (arbsdp_eigh's top column of the solver's X,
+ * frozen to an EXACT midpoint vector); it is used ONLY as the primal direction
+ * and is NOT a rigor dependency -- contrast the strictly-rigorous ball arithmetic
+ * of the quotient itself.  A bad v merely loosens lb; it can never make it unsound.
+ *
+ * APPLICABILITY (CONSERVATIVE): returns 1 and sets lb_out only when the rank-1
+ * trace construction is provably valid -- single block (p->nblocks == it->nblocks
+ * == 1), single constraint (p->m == it->m == 1), and A_1 materializes EXACTLY to
+ * the identity I_n (every diagonal entry arb_is_one, every off-diagonal entry
+ * arb_is_zero).  Otherwise returns 0 with lb_out untouched, so the caller falls
+ * back to the rigorous dual bound (safe).  Multi-block / multi-constraint /
+ * higher-rank feasible points are follow-ups.
+ *
+ * Citation: R(v) <= lambda_max(C) is standard (Parlett, "The Symmetric
+ * Eigenvalue Problem", 1998, the Rayleigh-quotient / Courant-Fischer min-max);
+ * this is the primal mirror of the dual-residual Jansson lower bound.
+ *
+ * Memory (CLAUDE.md rule 7): lb_out is a caller-init'd output; all temporaries are
+ * scoped and cleared.  p, it non-NULL.  prec is the working precision.
+ *
+ * returns 1 and sets lb_out (a rigorous lower-bound ball) if applicable; returns
+ * 0 (lb_out untouched) if not.
+ */
+int arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
+                              const arbsdp_iterate *it, slong prec);
+
+/*
  * arbsdp_certify_status -- the Layer-1 status of a bracket (MATH_SPEC §5.6, the
  * finiteness subset; the gap <= tol "optimal" refinement is Layer-2).
  */

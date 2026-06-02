@@ -124,11 +124,17 @@ Layer 1 (the product) is un-deferred and its **first rigorous bracket shipped**
 (b27→b17→b18→b19 done). `arbsdp_certify_bracket` returns a rigorous `[lb,ub]`
 containing the optimum for tr-bounded goldens. Remaining, roughly by value:
 
-1. **Tighten `lb` (highest-value Layer-1 step; Layer-2 / dual correction, bead b24):**
-   the upper bound is tight at the converged dual but the lower bound is loose (e.g.
-   `[1, 3]` for max_eigenvalue_2x2 where p*=3). A small dual-feasibility correction
-   (project y_ext to make Z_ext PSD) or interval-Newton/Krawczyk closes the gap to a
-   tight two-sided certificate. The bracket is RIGOROUS today; this makes it TIGHT.
+1. **Tighten `lb` (highest-value Layer-1 step) -- DONE 2026-06-02 (bead arb-prec-IPM-vry).**
+   The dual-residual `lb` is structurally stuck at `lambda_min(C)` for max-eigenvalue
+   problems (the [1,3] bracket; NB the old "project y_ext to make Z_ext PSD" idea does NOT
+   work -- for a max problem that only lowers `b^T y_ext`). The fix is a rigorous PRIMAL
+   Rayleigh lower bound: a feasible rank-1 point `X_hat = b_1 v v^T/(v^T v)` gives
+   `lb = b_1 (v^T C v)/(v^T v) <= opt` for any `v` (PSD by construction; no Cholesky;
+   MATH_SPEC §5.4.1). `arbsdp_certify_bracket` now returns `lb = max(dual, primal)`.
+   Measured: max_eigenvalue_2x2/tridiag/path_4 lb moves from `lambda_min(C)` (gap ~2) to
+   within `~1e-192` of opt; 14/14 ctest normal+ASan; mutation-checked (disable primal ->
+   tightness fails; inflate lb -> rigor gate fails). Single-block single-trace only;
+   per-block + general higher-rank/coupled follow-up: bead **arb-prec-IPM-oc7**.
 2. **arb-prec-IPM-om9 (P1, rigor) — DONE 2026-06-02.** Trace-bound convention (no JCK
    `s_b` factor) re-verified against JCK 2007 directly (MATH_SPEC §5.3.1 "om9
    reconfirmation": JCK's `s_b` is Loewner-only; our trace form is `tr(DX) >=

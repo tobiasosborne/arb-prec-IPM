@@ -20,6 +20,7 @@
 #include "arbsdp/certify.h"
 #include "arbsdp/problem.h"
 #include "arbsdp/iterate.h"
+#include "arbsdp/linalg.h"   /* arbsdp_eigh: POINT-MODE top eigenvector (primal dir) */
 #include "arbsdp/svec.h"
 
 /* TAU_HEALTHY: the HSDE convergence threshold below which (tau, kappa) carry an
@@ -753,6 +754,150 @@ arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
 }
 
 /* ---------------------------------------------------------------------------
+ * arbsdp_primal_lower_bound -- rigorous PRIMAL (Rayleigh) lower bound from a
+ * FEASIBLE rank-1 primal point X_hat = b_1 * v v^T / (v^T v) (bead arb-prec-IPM-vry).
+ *
+ * Parlett 1998 ("The Symmetric Eigenvalue Problem", Rayleigh quotient / Courant-
+ * Fischer): R(v) = (v^T C v)/(v^T v) <= lambda_max(C) for ANY v != 0.  For the
+ * single-block single-trace external problem max <C,X> s.t. tr(X)=b_1, X>=0 (opt =
+ * b_1 lambda_max(C)), X_hat above is EXACTLY feasible (rank-1 => PSD by
+ * construction; tr(X_hat)=b_1), so <C,X_hat> = b_1 R(v) is a lower bound on opt.
+ *
+ * RIGOR (CLAUDE.md rule 2): the quotient is computed in BALL arithmetic, so lb_out
+ * is a true enclosure and its lower endpoint <= opt for the FIXED exact vector v.
+ * No eig rigor, no PSD certification of X (primal mirror of the dual bound; works
+ * at the PSD boundary, invariant 1).  v is the POINT-MODE top eigenvector of the
+ * solver's primal block, FROZEN to an exact midpoint vector -- a direction only,
+ * never a rigor dependency (a poor v merely loosens lb).
+ *
+ * Memory (rule 7): every init/_arb_vec_init/arb_mat_init has a matching clear.
+ * ------------------------------------------------------------------------- */
+int
+arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
+                          const arbsdp_iterate *it, slong prec)
+{
+    slong n;
+    int applicable;
+
+    assert(lb_out != NULL && p != NULL && it != NULL
+           && "primal_lower_bound: lb_out, p, it non-NULL");
+
+    /* APPLICABILITY (CONSERVATIVE, rule 2/8): only the single-block,
+     * single-trace-constraint shape supports the rank-1 trace construction. */
+    if (p->nblocks != 1 || p->m != 1 || it->nblocks != 1 || it->m != 1)
+        return 0;
+
+    n = it->block_n[0];
+    /* A consistent problem has block side |block_sizes[0]| == it->block_n[0];
+     * guard the eig/dimension assumptions regardless (rule 5). */
+    if (n <= 0)
+        return 0;
+
+    /* A_1 must materialize EXACTLY to I_n: a non-exact A_1 (any diagonal entry not
+     * arb_is_one, any off-diagonal not arb_is_zero) is a DIFFERENT constraint than
+     * tr(X)=b_1, so the feasibility proof would not hold -- reject to stay rigorous.
+     * (The max-eig goldens store A_1 from "1.0" strings, so the entries are exactly
+     * 1/0; arb_set_str of "1"/"0" yields a zero-radius exact ball.) */
+    applicable = 1;
+    {
+        arb_mat_t A1;
+        arb_mat_init(A1, n, n);
+        arbsdp_problem_block_mat(A1, p, /*matno=*/1, /*block=*/0, prec);
+        for (slong i = 0; i < n && applicable; i++) {
+            for (slong j = 0; j < n; j++) {
+                arb_srcptr e = arb_mat_entry(A1, i, j);
+                if (i == j) {
+                    if (!arb_is_one(e)) { applicable = 0; break; }
+                } else {
+                    if (!arb_is_zero(e)) { applicable = 0; break; }
+                }
+            }
+        }
+        arb_mat_clear(A1);
+    }
+    if (!applicable)
+        return 0;
+
+    /* COMPUTE the rigorous Rayleigh lower bound. */
+    {
+        arb_mat_t C;        /* file-sign objective block (n x n ball)            */
+        arb_mat_t Q;        /* eigenvectors (POINT MODE); top vector = last col  */
+        arb_ptr   eigvals;  /* length n (ASCENDING; unused except via the col)   */
+        arb_ptr   v;        /* exact (zero-radius) top eigenvector               */
+        arb_ptr   Cv;       /* C v (ball)                                        */
+        arb_t     b1;       /* b_1 (ball)                                        */
+        arb_t     num;      /* v^T C v (ball)                                    */
+        arb_t     den;      /* v^T v   (ball)                                    */
+        arb_t     ray;      /* num / den                                        */
+        arf_t     den_lo;   /* lower endpoint of den (divisibility guard)        */
+        int       rc;
+        int       ok = 1;   /* set 0 if the den guard trips                      */
+
+        arb_mat_init(C, n, n);
+        arb_mat_init(Q, n, n);
+        eigvals = _arb_vec_init(n);
+        v  = _arb_vec_init(n);
+        Cv = _arb_vec_init(n);
+        arb_init(b1);
+        arb_init(num);
+        arb_init(den);
+        arb_init(ray);
+        arf_init(den_lo);
+
+        arbsdp_problem_block_mat(C, p, /*matno=*/0, /*block=*/0, prec); /* C_file */
+        rc = arbsdp_problem_b(b1, p, 0, prec);                          /* b_1    */
+        assert(rc == 0 && "primal_lower_bound: b_1 failed to parse");
+        (void) rc;
+
+        /* POINT-MODE top eigenvector of the solver's primal block (direction only;
+         * NOT a rigor dependency).  arbsdp_eigh: eigenvalues ASCENDING, column j of
+         * Q is the unit eigenvector for eigvals[j] -> TOP vector is column n-1.
+         * Freeze it to an EXACT (zero-radius) midpoint vector: the bound is
+         * rigorous for ANY FIXED v, and using the midpoint stops the point-mode
+         * eigenvector's radius from widening the result while staying sound. */
+        arbsdp_eigh(eigvals, Q, it->X[0], prec);
+        for (slong i = 0; i < n; i++)
+            arb_get_mid_arb(v + i, arb_mat_entry(Q, i, n - 1));
+
+        /* BALL arithmetic for the rigorous quotient.  Cv_i = sum_j C[i][j] v_j
+         * via arb_dot (one rounding per row), then num = sum_i v_i (Cv)_i and
+         * den = sum_i v_i^2, each one arb_dot (tightest rigorous enclosure). */
+        for (slong i = 0; i < n; i++) {
+            arb_dot(Cv + i, NULL, 0,
+                    C->rows[i], 1,   /* row i of C: entries C[i][0..n-1]         */
+                    v, 1, n, prec);
+        }
+        arb_dot(num, NULL, 0, v, 1, Cv, 1, n, prec);   /* num = v^T C v          */
+        arb_dot(den, NULL, 0, v, 1, v,  1, n, prec);   /* den = v^T v            */
+
+        /* GUARD (rule 5): a rigorous divide needs den strictly positive.  If the
+         * LOWER endpoint of den is <= 0 the quotient is not enclosable -> not
+         * applicable (return 0, caller keeps the dual bound).  For an orthonormal
+         * Q this never fires (den ~ 1), but we never assume it. */
+        arb_get_lbound_arf(den_lo, den, prec);
+        if (arf_sgn(den_lo) <= 0) {
+            ok = 0;
+        } else {
+            arb_div(ray, num, den, prec);   /* ray = R(v) = (v^T C v)/(v^T v)     */
+            arb_mul(lb_out, b1, ray, prec); /* lb = b_1 * R(v) <= b_1 lambda_max  */
+        }
+
+        arb_mat_clear(C);
+        arb_mat_clear(Q);
+        _arb_vec_clear(eigvals, n);
+        _arb_vec_clear(v, n);
+        _arb_vec_clear(Cv, n);
+        arb_clear(b1);
+        arb_clear(num);
+        arb_clear(den);
+        arb_clear(ray);
+        arf_clear(den_lo);
+
+        return ok;   /* 1: lb_out set; 0: den guard tripped, lb_out untouched */
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * arbsdp_certify_bracket -- THE PRODUCT (bead arb-prec-IPM-b19): the rigorous
  * [lb, ub] with lb <= p*_ext <= ub (MATH_SPEC §5.4 + §5.5).  certify.h contract.
  *
@@ -834,6 +979,24 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
     arf_init(lo);
     arf_init(hi);
     arb_get_lbound_arf(lo, lb_ball, prec_c);
+    /* vry: tighten lb with the rigorous PRIMAL Rayleigh bound where applicable.
+     * Both the dual-residual lb (lb_ball) and the primal Rayleigh lb are rigorous
+     * lower bounds on p*_ext, so their MAX is rigorous and tighter -- it dominates
+     * the structurally-loose single-dual bound for max-eigenvalue problems
+     * (arf_cmp handles a -inf dual lo correctly: max(-inf, finite) = finite). */
+    {
+        arb_t lb_primal;
+        arb_init(lb_primal);
+        if (arbsdp_primal_lower_bound(lb_primal, p, it, prec_c)) {
+            arf_t lo_p;
+            arf_init(lo_p);
+            arb_get_lbound_arf(lo_p, lb_primal, prec_c);
+            if (arf_cmp(lo_p, lo) > 0)
+                arf_set(lo, lo_p);
+            arf_clear(lo_p);
+        }
+        arb_clear(lb_primal);
+    }
     arb_get_ubound_arf(hi, ub_ball, prec_c);
     arb_set_arf(lb, lo);
     arb_set_arf(ub, hi);

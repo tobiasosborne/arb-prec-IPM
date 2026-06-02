@@ -125,6 +125,51 @@ print_arb(const char *label, const arb_t x)
     flint_free(s);
 }
 
+/* -------------------------------------------------------------------------
+ * parse_opt_enclosure -- parse the golden's `optimal_value` string (correctly
+ * ROUNDED to `optimal_value_digits` significant decimal digits) into a BALL that
+ * PROVABLY CONTAINS the true optimum (NOT the bare rounded point).
+ *
+ * WHY (bead arb-prec-IPM-vry FINDING, CLAUDE.md rule 2/8): the reference string is
+ * the true optimum rounded to ~65 sig digits, so its value is OFF the truth by up
+ * to half a ulp at the last digit (e.g. 2+sqrt3's 65-digit string sits 5.19e-65
+ * BELOW the true 2+sqrt3).  The rigorous primal Rayleigh lb now resolves the true
+ * optimum to ~190 digits, so it can land ABOVE the 65-digit POINT while still being
+ * <= the TRUE optimum -- a tighter, still-rigorous lb.  Comparing the bound against
+ * the bare rounded point would FALSELY flag a P0; we must compare against the true
+ * optimum.  We do so by inflating the parsed value to a ball of radius one ulp at
+ * the last reference digit -- a CONSERVATIVE over-cover of the half-ulp rounding
+ * error -- so the ball provably brackets the true optimum.  This WIDENS the
+ * reference (rule 2: widen the interval, never the claim); the rigor gate then
+ * checks lb <= ubound(opt_enc) and lbound(opt_enc) <= ub, i.e. against the true
+ * optimum.  A bound that exceeded the TRUE optimum by more than the reference
+ * rounding would STILL be caught.
+ *
+ * radius = |opt| * 10^-(digits-1)  (one ulp; >= the 0.5-ulp worst case).  Falls back
+ * to a zero-radius point if optimal_value_digits is unset (<=0).
+ * ---------------------------------------------------------------------- */
+static void
+parse_opt_enclosure(arb_t opt_enc, const golden_case *c, slong prec)
+{
+    arb_set_str(opt_enc, c->optimal_value, prec);
+    if (c->optimal_value_digits > 0) {
+        arb_t rad;
+        arb_init(rad);
+        arb_abs(rad, opt_enc);                       /* |opt|                    */
+        /* rad *= 10^-(digits-1): one ulp at the last reference significant digit. */
+        {
+            arb_t ten_pow;
+            arb_init(ten_pow);
+            arb_set_si(ten_pow, 10);
+            arb_pow_ui(ten_pow, ten_pow, (ulong)(c->optimal_value_digits - 1), prec);
+            arb_div(rad, rad, ten_pow, prec);
+            arb_clear(ten_pow);
+        }
+        arb_add_error(opt_enc, rad);                 /* inflate the ball         */
+        arb_clear(rad);
+    }
+}
+
 /* ==========================================================================
  * Step 1 (RED -> GREEN): smoke test on max_eigenvalue_2x2.
  * max <C,X>, C=[[2,1],[1,2]], A_1=I, b=[1] -> p*=lambda_max(C)=3, xbar=[1].
@@ -287,15 +332,31 @@ test_rigor_gate(const golden_case *cases, int n)
 
         arb_t lb, ub, opt, gap;
         arb_init(lb); arb_init(ub); arb_init(opt); arb_init(gap);
-        arb_set_str(opt, c->optimal_value, CMP_PREC);
+        /* opt is an ENCLOSURE ball provably containing the TRUE optimum (the
+         * reference string is only correctly-rounded to ~65 digits; bead vry). */
+        parse_opt_enclosure(opt, c, CMP_PREC);
 
         arbsdp_certify_status st =
             arbsdp_certify_bracket(lb, ub, &p, &r.res.it, &ab, prec_c);
 
-        /* THE GATE (CLAUDE.md rule 2): opt MUST be inside [lb, ub]. */
-        int lo_ok = arb_le(lb, opt);
-        int hi_ok = arb_le(opt, ub);
-        int contains = lo_ok && hi_ok;
+        /* THE GATE (CLAUDE.md rule 2): the TRUE optimum MUST be inside [lb, ub].
+         * Falsifiable against the true opt (NOT the rounded point): lb is sound
+         * unless it exceeds the UPPER endpoint of the opt enclosure; ub is sound
+         * unless it falls below the LOWER endpoint.  A bound exceeding the true
+         * optimum by more than the reference rounding is still caught. */
+        int lo_ok, hi_ok, contains;
+        {
+            arf_t opt_lo, opt_hi, lb_lo, ub_hi;
+            arf_init(opt_lo); arf_init(opt_hi); arf_init(lb_lo); arf_init(ub_hi);
+            arb_get_lbound_arf(opt_lo, opt, CMP_PREC);
+            arb_get_ubound_arf(opt_hi, opt, CMP_PREC);
+            arb_get_lbound_arf(lb_lo, lb, CMP_PREC);   /* lb is an exact point here */
+            arb_get_ubound_arf(ub_hi, ub, CMP_PREC);   /* ub is an exact point here */
+            lo_ok = (arf_cmp(lb_lo, opt_hi) <= 0);     /* lb <= ubound(true opt)   */
+            hi_ok = (arf_cmp(opt_lo, ub_hi) <= 0);     /* lbound(true opt) <= ub   */
+            arf_clear(opt_lo); arf_clear(opt_hi); arf_clear(lb_lo); arf_clear(ub_hi);
+        }
+        contains = lo_ok && hi_ok;
 
         arb_sub(gap, ub, lb, CMP_PREC);
         double margin = containment_margin_digits(lb, ub, opt);
@@ -708,6 +769,192 @@ test_trace_vs_loewner(void)
     unlink(path);
 }
 
+/* -------------------------------------------------------------------------
+ * closed_form_opt -- fill `out` with the EXACT closed-form true optimum for the
+ * three max-eigenvalue goldens used by test_tight_lb_primal, computed as a tight
+ * ball at precision `prec` (~2^-prec radius).  This gives a strictly stronger rigor
+ * gate than the 65-digit enclosure from parse_opt_enclosure: the margin is ~2^-4096
+ * rather than ~4e-64.
+ *
+ *   max_eigenvalue_2x2   -> 3              (exact integer)
+ *   max_eig_tridiag_3x3  -> 2 + sqrt(3)
+ *   max_eig_path_4       -> (5 + sqrt(5)) / 2
+ *
+ * Sets `out` to arb_indeterminate for any unrecognised name (test will flag it).
+ * ---------------------------------------------------------------------- */
+static void
+closed_form_opt(arb_t out, const char *name, slong prec)
+{
+    if (strcmp(name, "max_eigenvalue_2x2") == 0) {
+        arb_set_si(out, 3);
+    } else if (strcmp(name, "max_eig_tridiag_3x3") == 0) {
+        /* 2 + sqrt(3): set out = 3, sqrt in place, add 2. */
+        arb_set_ui(out, 3);
+        arb_sqrt(out, out, prec);
+        arb_add_ui(out, out, 2, prec);
+    } else if (strcmp(name, "max_eig_path_4") == 0) {
+        /* (5 + sqrt(5)) / 2: set out = 5, sqrt in place, add 5, halve. */
+        arb_set_ui(out, 5);
+        arb_sqrt(out, out, prec);
+        arb_add_ui(out, out, 5, prec);
+        arb_mul_2exp_si(out, out, -1);
+    } else {
+        arb_indeterminate(out);
+    }
+}
+
+/* ==========================================================================
+ * Step 10: TIGHT LOWER BOUND via the PRIMAL Rayleigh bound (bead arb-prec-IPM-vry).
+ *
+ * For the single-block, single-trace-constraint max-eigenvalue family (A_1 = I,
+ * b = [1], so tr(X) = 1), the DUAL-residual lower bound is STRUCTURALLY LOOSE: it
+ * returns lb = lambda_min(C) (e.g. 1 for max_eigenvalue_2x2), giving a ~2-wide gap
+ * to opt = lambda_max(C).  The primal Rayleigh bound (arbsdp_primal_lower_bound)
+ * exhibits a FEASIBLE rank-1 primal point X_hat = v v^T (v ~ top eigenvector of C)
+ * whose objective <C,X_hat> = R(v) is quadratically accurate near an eigenvector;
+ * arbsdp_certify_bracket now takes the MAX of the two rigorous lower bounds, so the
+ * bracket's lb is TIGHT (true_opt - lb ~ 1e-65: the Rayleigh quotient resolves the
+ * true optimum essentially exactly, far below the 1e-6 gate).
+ *
+ * FINDING (bead vry; CLAUDE.md rule 2/8): the now-tight lb resolves the true
+ * optimum to ~190 digits, PAST the 65-digit reference STRING -- so lb sits ABOVE
+ * the rounded reference point while remaining <= the TRUE optimum (verified
+ * directly against 2+sqrt3 et al.).  The rigor gate must therefore compare against
+ * an ENCLOSURE ball (parse_opt_enclosure) that provably contains the true optimum,
+ * NOT the bare rounded point.  This WIDENS the reference (rule 2: widen the
+ * interval, never the claim); the bound itself is unchanged and rigorous.
+ *
+ * GATE (CLAUDE.md rule 2/8): lb <= ubound(true opt) (rigor) is the falsifiable
+ * theorem; opt <= ub is unchanged.  The 1e-6 tightness gate is the whole point of
+ * the bead, conservatively far below the OLD ~2-wide gap; if a golden's gap is NOT
+ * < 1e-6 it is a P0 finding (primal bound not applied or poor solve) -- DO NOT
+ * loosen the threshold, STOP and report (per the bead).
+ * ======================================================================== */
+static void
+test_tight_lb_primal(const golden_case *cases, int n)
+{
+    /* Single-block, single-trace-constraint max-eigenvalue goldens (A_1 = I, so
+     * the primal Rayleigh bound applies).  opt = lambda_max(C). */
+    static const char *names[] = {
+        "max_eigenvalue_2x2",   /* opt = 3                 */
+        "max_eig_tridiag_3x3",  /* opt = 3.7320508...      */
+        "max_eig_path_4",       /* opt = 3.6180339...      */
+    };
+    int nn = (int) (sizeof names / sizeof names[0]);
+
+    fprintf(stderr,
+            "\nTIGHT-LB (vry): primal Rayleigh lower bound on max-eigenvalue goldens "
+            "(opt-lb MUST be < 1e-6):\n");
+
+    for (int k = 0; k < nn; k++) {
+        const golden_case *c = find_case(cases, n, names[k]);
+        CHECK(c != NULL, "tight_lb: golden discovered");
+        if (c == NULL)
+            continue;
+
+        arbsdp_problem p;
+        arbsdp_adaptive_result r;
+        slong prec_c = solve_to_iterate(&p, &r, c);
+
+        /* xbar = 1: tr(X) = 1 (A_1 = I_n, b_1 = 1), exactly as test_rigor_gate. */
+        arbsdp_apriori ab;
+        arbsdp_apriori_init(&ab, p.nblocks);
+        {
+            arb_t one; arb_init(one); arb_one(one);
+            arbsdp_apriori_set_xbar(&ab, 0, one);
+            arb_clear(one);
+        }
+
+        arb_t lb, ub, opt, gap, tol6;
+        arb_init(lb); arb_init(ub); arb_init(opt); arb_init(gap); arb_init(tol6);
+        /* opt is an ENCLOSURE ball provably containing the TRUE optimum (bead vry;
+         * the reference string is only correctly-rounded to ~65 digits, and the
+         * now-tight lb resolves the true optimum well past 65 digits). */
+        parse_opt_enclosure(opt, c, CMP_PREC);
+
+        arbsdp_certify_status st =
+            arbsdp_certify_bracket(lb, ub, &p, &r.res.it, &ab, prec_c);
+
+        /* RIGOR (falsifiable against the TRUE optimum, not the rounded point): lb is
+         * sound unless it exceeds the UPPER endpoint of the opt enclosure; ub is
+         * sound unless it falls below the LOWER endpoint. */
+        CHECK(st == ARBSDP_CERTIFY_OPTIMAL_BRACKET,
+              "tight_lb: status OPTIMAL_BRACKET");
+        {
+            arf_t opt_lo, opt_hi, lb_lo, ub_hi;
+            arf_init(opt_lo); arf_init(opt_hi); arf_init(lb_lo); arf_init(ub_hi);
+            arb_get_lbound_arf(opt_lo, opt, CMP_PREC);
+            arb_get_ubound_arf(opt_hi, opt, CMP_PREC);
+            arb_get_lbound_arf(lb_lo, lb, CMP_PREC);
+            arb_get_ubound_arf(ub_hi, ub, CMP_PREC);
+            CHECK(arf_cmp(lb_lo, opt_hi) <= 0, "tight_lb: lb <= ubound(true opt) (rigor)");
+            CHECK(arf_cmp(opt_lo, ub_hi) <= 0, "tight_lb: lbound(true opt) <= ub (rigor)");
+            arf_clear(opt_lo); arf_clear(opt_hi); arf_clear(lb_lo); arf_clear(ub_hi);
+        }
+
+        /* STRONG RIGOR GATE (closed-form; ~2^-4096 margin).
+         * Compare lb against the TRUE closed-form optimum computed to CMP_PREC bits
+         * (radius ~2^-4096), rather than only the 65-digit enclosure (~4e-64).
+         * lb is an exact point; topt_cf is a tight ball.  arb_le(lb, topt_cf)
+         * requires ubound(lb) <= lbound(topt_cf), which holds with a large margin
+         * when the bound is correct.  Any failure here is a real rigor violation:
+         * lb exceeds the TRUE optimum -- DO NOT weaken; STOP and report (rule 2/8). */
+        {
+            arb_t topt_cf, diff;
+            arb_init(topt_cf);
+            arb_init(diff);
+            closed_form_opt(topt_cf, names[k], CMP_PREC);
+            CHECK(arb_le(lb, topt_cf),
+                  "tight_lb: lb <= TRUE closed-form opt (3 / 2+sqrt3 / (5+sqrt5)/2)");
+            /* Diagnostic: (topt_cf - lb) at ~12 significant digits. */
+            arb_sub(diff, topt_cf, lb, CMP_PREC);
+            {
+                char *sdiff = arb_get_str(diff, 12, ARB_STR_NO_RADIUS);
+                fprintf(stderr, "  %-22s  topt_cf - lb = %s  (closed-form rigor gate)\n",
+                        names[k], sdiff);
+                flint_free(sdiff);
+            }
+            arb_clear(topt_cf);
+            arb_clear(diff);
+        }
+
+        /* TIGHTNESS: (ubound(true opt)) - lb < 1e-6.  Measuring the gap from the
+         * UPPER endpoint of the opt enclosure is a CONSERVATIVE upper bound on the
+         * true gap (true_opt - lb), so this gate is if anything stricter than the
+         * literal opt-lb.  The primal Rayleigh bound makes the true gap ~1e-65
+         * (it resolves the true optimum essentially exactly), far below 1e-6. */
+        {
+            arf_t opt_hi, lb_lo;
+            arf_init(opt_hi); arf_init(lb_lo);
+            arb_get_ubound_arf(opt_hi, opt, CMP_PREC);
+            arb_get_lbound_arf(lb_lo, lb, CMP_PREC);
+            arf_sub(arb_midref(gap), opt_hi, lb_lo, CMP_PREC, ARF_RND_CEIL);
+            mag_zero(arb_radref(gap));               /* exact point gap (over-estimate) */
+            arf_clear(opt_hi); arf_clear(lb_lo);
+        }
+        arb_set_str(tol6, "1e-6", CMP_PREC);
+        CHECK(arb_lt(gap, tol6),
+              "tight_lb: opt-lb < 1e-6 (primal Rayleigh tightened the loose dual lb)");
+
+        /* Concrete diagnostics (CLAUDE.md rule 11; ~30 digits to stderr). */
+        {
+            char *slb  = arb_get_str(lb,  30, ARB_STR_NO_RADIUS);
+            char *sub  = arb_get_str(ub,  30, ARB_STR_NO_RADIUS);
+            char *sgap = arb_get_str(gap, 30, ARB_STR_NO_RADIUS);
+            fprintf(stderr, "  %-22s lb=%s ub=%s opt-lb=%s\n",
+                    names[k], slb, sub, sgap);
+            flint_free(slb);
+            flint_free(sub);
+            flint_free(sgap);
+        }
+
+        arb_clear(lb); arb_clear(ub); arb_clear(opt); arb_clear(gap); arb_clear(tol6);
+        arbsdp_apriori_clear(&ab);
+        arbsdp_adaptive_result_clear(&r);
+        arbsdp_problem_clear(&p);
+    }
+}
+
 int main(void)
 {
     golden_case cases[MAX_CASES];
@@ -723,6 +970,7 @@ int main(void)
     test_honest_infinity(cases, n);
     test_sign_selftest(cases, n);
     test_trace_vs_loewner();
+    test_tight_lb_primal(cases, n);
 
     if (failures == 0) {
         printf("\ntest_certify_bracket: ALL PASS\n");

@@ -714,6 +714,51 @@ The a-priori bound is a FIRST-CLASS API input (PRD.md §4.6).  For the primary
 use cases it is free: density matrices have tr = 1, normalized moment matrices
 have a bounded [1,1] entry.
 
+### 5.4.1 Tight primal lower bound (Rayleigh quotient of a feasible rank-1 point)
+
+Bead arb-prec-IPM-vry.  The dual-residual lower bound (§5.4) is STRUCTURALLY LOOSE
+for max-eigenvalue problems.  For  max <C,X> s.t. tr(X)=1, X>=0  (opt = lambda_max(C)),
+at any external dual y_ext the residual is Z_ext = C - y_ext I, and the §5.4 bound
+lb = b^T y_ext + min(0, lambda_min(Z_ext)) is STUCK at lambda_min(C) for every y_ext:
+at the converged dual y_ext = lambda_max(C), Z_ext = C - lambda_max(C) I has
+lambda_min = lambda_min(C) - lambda_max(C), giving lb = lambda_max(C) + (lambda_min(C)
+- lambda_max(C)) = lambda_min(C).  E.g. the bracket [1,3] for max_eigenvalue_2x2
+(opt=3=lambda_max, lb stuck at lambda_min=1).  No choice of y_ext tightens it.
+
+A TIGHT rigorous lower bound comes from the PRIMAL side (a feasible primal point lower-
+bounds a max).  For a single trace constraint <I,X>=b_1 and ANY v != 0,
+    X_hat = b_1 * v v^T / (v^T v)
+is EXACTLY feasible -- PSD by construction (rank-1 outer product; NO Cholesky, works at
+the PSD boundary, invariant 1) and tr(X_hat)=b_1 -- so
+    lb_primal = b_1 * (v^T C v)/(v^T v) = b_1 * R(v) <= b_1 * lambda_max(C) = opt
+where R(v) is the Rayleigh quotient and R(v) <= lambda_max(C) for every v (Courant-
+Fischer; Parlett, The Symmetric Eigenvalue Problem, 1998).  Evaluated in BALL arithmetic
+(lower endpoint = lower(v^T C v)/upper(v^T v)) it is rigorous for ANY v REGARDLESS of
+solve quality, and TIGHT when v ~ top eigenvector (R is quadratically accurate near an
+eigenvector).  v is the POINT-MODE top eigenvector of the solver's primal block X~ (a
+direction only, never a rigor dependency).
+
+arbsdp_certify_bracket sets lb = max(dual-residual lb §5.4, primal Rayleigh lb): both
+are rigorous lower bounds so their max is rigorous and tighter.  Implemented:
+arbsdp_primal_lower_bound (certify.c).  Measured (max_eigenvalue_2x2 / max_eig_tridiag_3x3
+/ max_eig_path_4 at prec_c = final_prec+128): bracket lb moves from lambda_min(C) (gap ~2)
+to within ~2^-192 of opt (true_opt - lb ~ 1e-192).  APPLICABILITY: single block, single
+trace constraint A_1 = I (conservative exact check; returns 0 -> caller keeps the dual
+bound otherwise).  Per-block trace constraints (separable_12block) and general higher-rank
+/ coupled-constraint feasible primal points (two_block_corr_coupled; shares the primal-PSD-
+projection machinery of UB-B/§5.5, bead 9tm) are follow-ups: bead arb-prec-IPM-oc7.
+
+GOLDEN-REFERENCE PRECISION (vry finding, CLAUDE rule 2/8).  The golden optimal_value
+strings are correctly-rounded to ~65 digits, so for an IRRATIONAL optimum the string sits
+up to half a ulp BELOW the true optimum.  A now-tight lb (resolving the optimum to ~190
+digits) can land ABOVE the 65-digit point while remaining <= the TRUE optimum; comparing a
+bound against the bare rounded point would FALSELY flag a P0.  The rigor tests therefore
+compare against (a) an ENCLOSURE ball of the true optimum (reference +/- one ulp, a
+conservative over-cover of the half-ulp rounding) and, for the analytic goldens, (b) the
+CLOSED-FORM true optimum (3, 2+sqrt3, (5+sqrt5)/2) computed in-test at 4096 bits.  Verified:
+lb <= true closed-form opt with margin ~2^-192, 0 violations.  This WIDENS the reference
+(rule 2: widen the interval, never the bound); the bound itself is unchanged and rigorous.
+
 ### 5.5 Rigorous upper bound (dual-side symmetric mirror of §5.4)
 
 The upper bound on `p*_ext = max <C_file, X>` is the exact dual-side MIRROR of the
