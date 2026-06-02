@@ -448,8 +448,44 @@ multi-month effort; P1+P3 are the long poles.)*
 1. **MOI/JuMP backend** — recommend *yes, Phase 5* (huge golden-master payoff).
    Default unless you want to avoid the JuMP dep in the core.
 2. **ABI data format** — recommend *strings (option a)* for v1, shared-arb later.
-3. **arb-midpoint vs `arf`/`mpfr` for L0 arithmetic** — recommend *arb midpoints*
-   for type uniformity; `arf` is a perf option if L0 dominates.
+3. **arb-midpoint vs `arf`/`mpfr` for L0 arithmetic** — **RESOLVED (bead
+   arb-prec-IPM-epic.6, 2026-06-02):** Layer 0 operates on pure MIDPOINTS via
+   **radius-clearing**: after each IPM iterate update, `iterate_clear_radii()`
+   in `c/src/solve.c` zeros the Arb radii of `X`, `S`, `y`, `tau`, `kappa`
+   in-place (`mag_zero(arb_radref(...))`, no allocation). This is what CLAUDE
+   rule 1 ("solve in points, radii not trusted") requires; the tested
+   `arb_mat_*` kernels are reused as-is; rigor remains exclusively Layer-1's
+   job (ball arithmetic, separate code path).
+
+   **Why `arf_t` was rejected:** FLINT 3.0.1 ships no `arf_mat` module — no
+   `arf_mat_cho`, no arf eigendecomposition, no arf triangular solve; only
+   scalar `arf.h`/`arf_types.h`. Switching would require reimplementing
+   Cholesky, the Jacobi eigensolver, triangular solve, NT scaling, and Schur
+   assembly from scratch, discarding the tested `arb_mat_*` kernels, for zero
+   measured benefit over radius-clearing (CLAUDE rule 12). Radius-clearing
+   IS the `arf` semantics (midpoint-only) obtained by reusing those kernels.
+   `arf_mat` remains a future option only if a later FLINT ships it AND a
+   measured improvement materialises.
+
+   **Mechanism eliminated:** near the PSD boundary the Schur condition number
+   grows ~1/μ, so the untrusted ball radius on each iterate eigenvalue was
+   growing 30–60 bits per IPM step until λ_min's ball straddled zero, at which
+   point `arb_rsqrt`/`arb_inv` in NT scaling returned a NaN midpoint →
+   `iterate_is_valid` failed → `ARBSDP_SOLVE_NUMERICAL` → precision escalation.
+   Clearing the radii each step prevents this without touching the arithmetic.
+
+   **Measured outcome (test_golden, 2026-06-02):** bits/digit before → after:
+   sdp_sqrt2 158→18, mixed_blocks 153→20, disparate_scale_sqrt2 153→38,
+   max_eig_path_16 138→32, two_block_corr_coupled 131→33, lp_diagonal_block
+   81→10, max_eig_tridiag_3x3 75→19, max_eigenvalue_2x2 74→19, max_eig_path_8
+   68→17, max_eig_path_4 37→18, separable_12block 33→16, diag_weight_kappa6/10/12
+   18→9, ill_conditioned_3x3 ~58→9, trivial_2x2 now 15 digits at prec=256 (was
+   512 bits for 15 digits). Suite: 16/16 corr=PASS eff=PASS; wall time
+   22.85 s → 6.37 s; recovered objectives unchanged. Residual efficiency gaps
+   (disparate_scale_sqrt2 38, two_block_corr_coupled 33, max_eig_path_16 32
+   b/d) are driven by Schur conditioning and precision-controller granularity;
+   tracked by bead arb-prec-IPM-wdz (relates to b31 warm-start, p68 controller).
+
 4. **Cone scope** — recommend *SDP + LP-via-diagonal-blocks only* in v1; SOCP later.
 5. **Distribution** — recommend *local build first*, `ArbSDP_jll` via Yggdrasil at
    Phase 5.

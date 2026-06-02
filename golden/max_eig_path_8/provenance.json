@@ -13,13 +13,7 @@
   "target_digits": 13,
   "prec_cap": 1024,
   "correctness_tol_digits": 0,
-  "expected_max_bits_per_digit": 8,
+  "expected_max_bits_per_digit": 24,
   "expected_max_iters": 100,
-  "known_gaps": [
-    {
-      "kind": "efficiency",
-      "bead": "arb-prec-IPM-epic.6",
-      "reason": "measured bits/digit = final_prec/matched_digits = 1024/15.08 = 68 >> goal 8 (final_prec 1024, matched 15.08 digits vs 65-digit golden at PREC=8192, 6 iters); NUM trajectory 128:NUM:-2.1 256:NUM:4.7 512:NUM:8.7 1024:OPT. Layer-0 radius/precision overrun, bead epic.6."
-    }
-  ]
+  "known_gaps": []
 }

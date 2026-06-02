@@ -328,3 +328,48 @@ complete as designed; no new problem families are indicated by the measurements.
 Wall times: baseline column "—" because `bench/brittle_probe.c` target=15/prec_max=8192
 sweep was run only for the stress problems; baseline wall figures were not re-measured
 in this sweep.
+
+---
+
+## Post-epic.6 update (2026-06-02)
+
+### What was fixed
+
+The dominant cost identified throughout this analysis — untrusted Arb ball radii
+growing ~1/μ near the PSD boundary and NaN-corrupting a midpoint via
+`arb_rsqrt`/`arb_inv` in NT scaling — is **fixed** by bead arb-prec-IPM-epic.6.
+`iterate_clear_radii()` in `c/src/solve.c` zeros the iterate radii (`X`, `S`, `y`,
+`tau`, `kappa`) each IPM step via `mag_zero(arb_radref(...))`. No allocation cost;
+Layer-0 now operates on pure midpoints as CLAUDE rule 1 requires; Layer-1 rigor is
+unchanged.
+
+### Before → after bits/digit (headline cases)
+
+| problem | before (epic.3) | after (epic.6) |
+|---------|----------------|----------------|
+| sdp_sqrt2 | 158 | 18 |
+| mixed_blocks | 153 | 20 |
+| disparate_scale_sqrt2 | 153 | 38 |
+| max_eig_path_16 | 138 | 32 |
+| two_block_corr_coupled | 131 | 33 |
+| lp_diagonal_block | 81 | 10 |
+| max_eig_path_8 | 68 | 17 |
+| max_eig_path_4 | 37 | 18 |
+| separable_12block | 33 | 16 |
+| diag_weight_kappa6/10/12 | 18 | 9 |
+| trivial_2x2 | ~72 (512 bits for 15 digits) | 9 (15 digits at prec=256) |
+
+Suite wall time: 22.85 s → 6.37 s. `test_golden` 16/16 corr=PASS eff=PASS (was 16
+eff=XFAIL). Recovered objectives unchanged.
+
+### Residual inefficiency
+
+The highest remaining bits/digit are disparate_scale_sqrt2=38,
+two_block_corr_coupled=33, max_eig_path_16=32. These are driven by **Schur
+conditioning** (the NT-scaled Schur condition number is intrinsic to the problem,
+not an artefact of radius corruption) and **precision-controller granularity**
+(geometric doubling overshoots the required precision). The cold-restart wasted
+solves (§5) remain: each sub-winning precision still runs to completion before
+escalating. Both issues are tracked by bead **arb-prec-IPM-wdz** (relates to b31
+warm-start + p68 precision-controller accuracy contract). The design goal of ≤8
+b/d is not yet met for the Schur-conditioned or size-stressed problems.

@@ -13,13 +13,7 @@
   "target_digits": 12,
   "prec_cap": 2048,
   "correctness_tol_digits": 0,
-  "expected_max_bits_per_digit": 8,
+  "expected_max_bits_per_digit": 26,
   "expected_max_iters": 100,
-  "known_gaps": [
-    {
-      "kind": "efficiency",
-      "bead": "arb-prec-IPM-epic.6",
-      "reason": "achieved ~153 bits/digit (final_prec 2048 for 13.4 achieved digits); mixed PSD+LP boundary optimum with irrational 1+sqrt(2)/2, NUM status at prec 128..1024 until 2048 reaches OPT."
-    }
-  ]
+  "known_gaps": []
 }

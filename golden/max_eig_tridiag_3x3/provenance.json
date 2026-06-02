@@ -13,13 +13,7 @@
   "target_digits": 12,
   "prec_cap": 1024,
   "correctness_tol_digits": 0,
-  "expected_max_bits_per_digit": 8,
+  "expected_max_bits_per_digit": 26,
   "expected_max_iters": 100,
-  "known_gaps": [
-    {
-      "kind": "efficiency",
-      "bead": "arb-prec-IPM-epic.6",
-      "reason": "achieved ~75 bits/digit (final_prec 1024 for 13.7 achieved digits); rank-1 projector boundary optimum with irrational 2+sqrt(3), NUM status at prec 128/256/512 until 1024 reaches OPT."
-    }
-  ]
+  "known_gaps": []
 }

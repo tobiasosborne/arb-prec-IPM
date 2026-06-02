@@ -24,23 +24,23 @@
  *      recovered value to its analytic golden.  >=3 MUST pass.
  *   2. STATUS == OPTIMAL for the converging problems; iters reported and < limit.
  *   3. BEAT-OR-BRACKET (CLAUDE.md rule 4): report achieved digits vs the analytic
- *      golden; sdp_sqrt2 (irrational rank-deficient optimum) is driven to full
- *      OPTIMAL convergence at a higher precision, demonstrating the driver is
- *      correct and the prec=256 shortfall is a precision FLOOR (b16's job), not
- *      an algorithm bug.
+ *      golden; sdp_sqrt2 (irrational rank-deficient optimum) reaches OPTIMAL at
+ *      both prec=256 and prec=1024 (~10 digits), demonstrating the driver is
+ *      correct on the rank-deficient cone boundary.
  *   4. MUTATION (CLAUDE.md rule 8): the OBJECTIVE RECOVERY sign flip (invariant 7)
  *      is load-bearing -- the correctly-recovered sqrt(2) is POSITIVE, while the
  *      un-flipped internal objective (pObj/tau) is -sqrt(2); a missing/flipped
  *      sign would yield -sqrt(2) and the test catches it.
  *
- * HONEST LIMITATION (CLAUDE.md rule 5, documented for b16): sdp_sqrt2 has an
- * IRRATIONAL optimum on the RANK-DEFICIENT cone boundary; at the fixed prec=256
- * the point-mode iterate is driven numerically out of the cone (mu -> 0^-) once
- * mu ~ 1e-3, BEFORE the 1e-8 6-flag test fires, so the driver exits NUMERICAL
- * with a best-effort value good to ~4 digits.  This is the canonical case the
- * precision controller (b16) escalates; we do NOT loosen the convergence
- * tolerance to force a prec=256 pass (bead instruction).  We instead prove the
- * driver converges this very problem to OPTIMAL at a higher precision.
+ * BOUNDARY CASE (CLAUDE.md rule 5): sdp_sqrt2 has an IRRATIONAL optimum on the
+ * RANK-DEFICIENT cone boundary.  PRE-epic.6 the point-mode iterate carried an
+ * untrusted radius that grew like kappa*2^-prec near convergence; at fixed
+ * prec=256 it tripped iterate_is_valid (mu -> 0^-) before the 1e-8 6-flag test
+ * fired, so the driver exited NUMERICAL with a best-effort value good to ~4
+ * digits and was treated as a precision FLOOR.  POST-epic.6 (untrusted iterate
+ * radii zeroed each IPM step, c/src/solve.c) sdp_sqrt2 reaches OPTIMAL at
+ * prec=256, matching the analytic golden to ~10 digits (error ~1e-10, vs the
+ * 1e-6 match tol) -- so it is now a must_converge case alongside the others.
  *
  * Arb memory discipline (CLAUDE.md rule 7): every init has a matching clear; the
  * result is always arbsdp_result_clear'd regardless of status.
@@ -197,7 +197,7 @@ test_solve_golden(void)
         const char *golden;
         int must_converge;   /* must reach OPTIMAL + match at prec=256          */
     } cases[] = {
-        { "sdp_sqrt2",          GOLD_SQRT2,    0 },  /* boundary floor: b16 (documented) */
+        { "sdp_sqrt2",          GOLD_SQRT2,    1 },  /* post-epic.6: OPTIMAL @ prec=256  */
         { "trivial_2x2",        GOLD_TRIVIAL,  1 },  /* rank-deficient, converges        */
         { "max_eigenvalue_2x2", GOLD_MAXEIG2,  1 },
         { "max_eig_tridiag_3x3",GOLD_TRIDIAG3, 1 },
@@ -281,19 +281,18 @@ test_solve_golden(void)
 
     printf("\n  %d / %d golden problems reached OPTIMAL and matched to %.0e at "
            "prec=%d.\n", passed, ncases, tol, PREC);
-    printf("  (sdp_sqrt2: irrational rank-deficient boundary optimum -- precision "
-           "FLOOR,\n   exits NUMERICAL with a best-effort value; full convergence "
-           "is b16's job.)\n");
+    printf("  (sdp_sqrt2: irrational rank-deficient boundary optimum -- post-epic.6 "
+           "reaches\n   OPTIMAL at prec=256, matching the golden to ~10 digits.)\n");
 
     /* >= 3 must pass (bead requirement). */
     CHECK(passed >= 3, "test_solve_golden: at least 3 golden problems must match");
 }
 
 /* ------------------------------------------------------------------------- *
- * Test 3: BEAT-OR-BRACKET (CLAUDE.md rule 4).  sdp_sqrt2 at prec=256 recovers   *
- * a best-effort value; at a higher precision the SAME driver drives it to full  *
- * OPTIMAL convergence -- proving the algorithm is correct and the prec=256       *
- * shortfall is a precision floor (b16), not an algorithm bug.                    *
+ * Test 3: BEAT-OR-BRACKET (CLAUDE.md rule 4).  sdp_sqrt2 reaches OPTIMAL at     *
+ * BOTH prec=256 and prec=1024 (post-epic.6) on the irrational rank-deficient    *
+ * cone boundary -- proving the algorithm is correct there.  Higher precision    *
+ * sharpens the recovered value; it is not required to clear NUMERICAL.          *
  * ------------------------------------------------------------------------- */
 static void
 test_beat_or_bracket(void)
@@ -305,15 +304,15 @@ test_beat_or_bracket(void)
 
     arb_init(value);
 
-    /* prec=256: best-effort (documented floor). */
+    /* prec=256: post-epic.6 this reaches OPTIMAL (~10 digits) on the boundary. */
     if (solve_one("sdp_sqrt2", 256, value, &status, &iters, &digits, GOLD_SQRT2)) {
         printf("\n  BEAT-OR-BRACKET (rule 4):\n");
-        printf("    sdp_sqrt2 @ prec=256 : ~%.1f digits, %d iters, status=%s "
-               "(best-effort; floor).\n", digits, iters, status_name(status));
-        /* Even the best-effort value must be a sane approximation to sqrt(2)
-         * (positive, within ~1e-3) -- a sign or recovery bug fails this. */
+        printf("    sdp_sqrt2 @ prec=256 : ~%.1f digits, %d iters, status=%s.\n",
+               digits, iters, status_name(status));
+        /* The recovered value must be a sane approximation to sqrt(2) (positive,
+         * within ~1e-3) -- a sign or recovery bug fails this. */
         CHECK(close_str(value, GOLD_SQRT2, 1e-3),
-              "beat_or_bracket: sdp_sqrt2 @256 best-effort must approximate +sqrt(2)");
+              "beat_or_bracket: sdp_sqrt2 @256 must approximate +sqrt(2)");
     }
 
     /* prec=1024: the SAME driver converges to OPTIMAL on the irrational boundary
@@ -395,12 +394,77 @@ test_mutation_sign(void)
     arbsdp_problem_clear(&p);
 }
 
+/* ------------------------------------------------------------------------- *
+ * Test 5 (bead arb-prec-IPM-epic.6): LOW-PREC OPTIMAL on a rank-deficient      *
+ * boundary optimum.  trivial_2x2 (max x_11 s.t. x_11=1, X>=0; X*=diag(1,0) is  *
+ * SINGULAR) at prec=256 with a TIGHT feas/opt tol of 1e-15 must reach          *
+ * ARBSDP_SOLVE_OPTIMAL with the recovered value matching 1.0 to >= 15 digits.  *
+ *                                                                              *
+ * RED (unfixed solver): epic.6 / b30 diagnosis -- the Layer-0 point-mode loop  *
+ * runs on arb BALLS whose untrusted radii (CLAUDE.md rule 1: NOT trusted in    *
+ * L0) propagate; near convergence the Schur cond ~1/mu grows lambda_min's ball *
+ * until it straddles zero, so arb_rsqrt/arb_inv in NT scaling return a NaN     *
+ * MIDPOINT -> iterate_is_valid fails -> ARBSDP_SOLVE_NUMERICAL with a value    *
+ * good to ~14 digits.  Confirmed: mu radius 1.1e-75 -> 3.8e-24 over 5 iters,   *
+ * then iter 6 NaNs.  This assertion FAILS at status==NUMERICAL pre-fix.        *
+ *                                                                              *
+ * GREEN (after iterate_clear_radii): pure-midpoint arithmetic keeps every      *
+ * lambda_min ball clean so rsqrt/inv never NaN; the strict 6-flag test fires   *
+ * and the solver returns OPTIMAL at prec=256.                                  *
+ * ------------------------------------------------------------------------- */
+static void
+test_epic6_lowprec_optimal(void)
+{
+    arbsdp_problem p;
+    arbsdp_result res;
+    arbsdp_solve_params params;
+    char path[1024];
+    int rc;
+    slong prec = 256;
+
+    arbsdp_problem_init(&p);
+    snprintf(path, sizeof path, "%s/trivial_2x2/trivial_2x2.dat-s", GOLDEN_DIR);
+    rc = arbsdp_read_sdpa(&p, path);
+    CHECK(rc == 0, "epic6_lowprec_optimal: cannot read trivial_2x2.dat-s");
+    if (rc != 0) { arbsdp_problem_clear(&p); return; }
+
+    /* Direct (NON-adaptive) fixed-prec solve at prec=256, demanding 15 digits
+     * (feas_tol = opt_tol = 1e-15) -- tighter than the 1e-8 defaults so the
+     * 6-flag test actually requires full convergence at this precision. */
+    arbsdp_solve_default_params(&params);
+    params.feas_tol = 1e-15;
+    params.opt_tol  = 1e-15;
+    arbsdp_solve(&res, &p, prec, &params);
+
+    printf("\n  EPIC.6 (low-prec OPTIMAL): trivial_2x2 @ prec=256, "
+           "feas/opt tol=1e-15:\n");
+    {
+        char *vs = arb_get_str(res.value, 20, ARB_STR_NO_RADIUS);
+        printf("    status=%s, iters=%d, recovered value=%s.\n",
+               status_name(res.status), res.iters, vs);
+        flint_free(vs);
+    }
+
+    /* (3) The unfixed solver returns NUMERICAL here; the fix makes it OPTIMAL. */
+    CHECK(res.status == ARBSDP_SOLVE_OPTIMAL,
+          "epic6_lowprec_optimal: trivial_2x2 @256 must reach OPTIMAL (epic.6 fix)");
+
+    /* (4) Recovered value (already sign/maximize-flipped by recover_value) must
+     *     match the analytic optimum 1.0 to >= 15 digits on the midpoint. */
+    CHECK(close_str(res.value, GOLD_TRIVIAL, 1e-15),
+          "epic6_lowprec_optimal: trivial_2x2 @256 value must match 1.0 to 1e-15");
+
+    arbsdp_result_clear(&res);
+    arbsdp_problem_clear(&p);
+}
+
 int
 main(void)
 {
     test_solve_golden();
     test_beat_or_bracket();
     test_mutation_sign();
+    test_epic6_lowprec_optimal();
 
     if (failures != 0) {
         fprintf(stderr, "\ntest_solve: %d check(s) FAILED\n", failures);

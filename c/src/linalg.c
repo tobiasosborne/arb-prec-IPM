@@ -237,7 +237,13 @@ psd_pow_half(arb_mat_t out, const arb_mat_t A, int invert, slong prec)
     /* not_pd iff lambda_min <= floor (midpoint test, POINT MODE) OR the
      * lambda_min ball straddles zero (arb_rsqrt/arb_inv would NaN -- the b30
      * mechanism, confirmed by /tmp/inv.c).  Eigenvalues are ascending so lam[0]
-     * is the smallest. */
+     * is the smallest.
+     *
+     * With epic.6 (c/src/solve.c:iterate_clear_radii) the iterate radii are
+     * zeroed each IPM step, so in normal Layer-0 operation inputs are clean
+     * midpoints and the arb_contains_zero branch below does NOT fire.  It is
+     * kept as a defensive backstop for any future caller that passes ball inputs
+     * (e.g. a Layer-1 path probing a perturbed matrix). */
     if (arf_cmp(arb_midref(lam + 0), arb_midref(floor_lam)) <= 0)
         not_pd = 1;
     if (arb_contains_zero(lam + 0))

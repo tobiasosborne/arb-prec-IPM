@@ -449,7 +449,39 @@ Source: HsdeNtSdpSolver.ts:1134-1143 (`initialScale`):
     tau  =  1
     kappa = 1
 
-### 3.10 Best-iterate tracking
+### 3.10 Radius zeroing (point-mode guarantee, epic.6)
+
+Source: `c/src/solve.c`, `iterate_clear_radii()`; bead arb-prec-IPM-epic.6;
+CLAUDE.md rule 1.
+
+After the iterate update at the end of each IPM step — and before the next NT
+scaling — the untrusted Arb radii of every iterate variable are zeroed in-place:
+
+    mag_zero(arb_radref(arb_mat_entry(X[b], i, j)))   for every b, i, j
+    mag_zero(arb_radref(arb_mat_entry(S[b], i, j)))   for every b, i, j
+    mag_zero(arb_radref(&y[i]))                        for every i
+    mag_zero(arb_radref(tau))
+    mag_zero(arb_radref(kappa))
+
+This zeroing (`iterate_clear_radii`) has no arb_init/arb_clear cost (rule 7)
+and makes Layer 0 operate on pure midpoints, which is what CLAUDE rule 1
+("solve in points, radii not trusted inside the loop") requires.
+
+**Why this is necessary:** the Schur/KKT condition number grows like 1/μ as
+the iterate approaches the optimum (CLAUDE.md invariant 3). In Arb ball
+arithmetic every matrix operation widens radii by a factor proportional to the
+condition number. Left unchecked, the accumulated (untrusted) ball radius on
+the iterate's eigenvalues grows 30–60 bits per IPM step until λ_min's ball
+straddles zero, at which point `arb_rsqrt`/`arb_inv` in NT scaling returns a
+NaN midpoint — triggering `ARBSDP_SOLVE_NUMERICAL` and a wasted precision
+escalation. Zeroing the radii each step eliminates this without perturbing the
+arithmetic content of the midpoints or the correctness of Layer-1 certification.
+
+**No rigor is lost:** Layer-0 radii are *untrusted by design* (the architecture
+table in PRD.md §2 lists "none" under Rigor for Layer 0). All rigor comes from
+Layer 1, which operates in ball arithmetic on the Layer-0 midpoint output.
+
+### 3.11 Best-iterate tracking
 
 Source: HsdeNtSdpSolver.ts:436-484.
 
@@ -868,3 +900,9 @@ claim to fit a result; widen the interval or report `inconclusive`.
 
 6. **maxRefactor — DECIDED: 20.** Matches the SDP call site; extra retries are free
    on well-conditioned problems. (Resolves Q6; addressed in b13.)
+
+7. **arb-midpoint vs arf for Layer-0 iterate arithmetic — DECIDED: radius-clearing
+   on arb_mat (CLAUDE rule 1; see §3.10 and PRD §11.3).** `arf_t` rejected because
+   FLINT 3.0.1 ships no `arf_mat` module; radius-clearing gives identical point-mode
+   semantics while reusing the tested `arb_mat_*` kernels. (Resolves PRD §11.3;
+   implemented in epic.6, `c/src/solve.c:iterate_clear_radii`.)

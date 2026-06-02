@@ -232,6 +232,33 @@ iterate_is_valid(const arbsdp_iterate *it)
         && mid_is_pos_finite(it->kappa);
 }
 
+/* epic.6 / CLAUDE rule 1: Layer 0 is point-mode -- ball radii are untrusted.
+ * Zero the iterate's radii each IPM step so accumulated (untrusted) radius
+ * cannot grow ~1/mu near the boundary and NaN-corrupt a midpoint via
+ * arb_rsqrt/arb_inv in NT scaling.  Pure midpoint arithmetic is what rule 1
+ * ("solve in points, radii not trusted") requires; rigor is Layer-1's job.
+ *
+ * In-place radius zeroing ONLY -- mag_zero(arb_radref(.)) touches no allocation,
+ * so this adds NO arb_init/arb_clear (CLAUDE.md rule 7).  Covers every iterate
+ * variable: X[b], S[b] (all entries), y[i], tau, kappa.  (Residuals/objectives
+ * are recomputed downstream from these clean midpoints; mu is derived too.) */
+static void
+iterate_clear_radii(arbsdp_iterate *it)
+{
+    for (int b = 0; b < it->nblocks; b++) {
+        slong n = it->block_n[b];
+        for (slong i = 0; i < n; i++)
+            for (slong j = 0; j < n; j++) {
+                mag_zero(arb_radref(arb_mat_entry(it->X[b], i, j)));
+                mag_zero(arb_radref(arb_mat_entry(it->S[b], i, j)));
+            }
+    }
+    for (int i = 0; i < it->m; i++)
+        mag_zero(arb_radref(&it->y[i]));
+    mag_zero(arb_radref(it->tau));
+    mag_zero(arb_radref(it->kappa));
+}
+
 /* achieved = max(rho_p, rho_d, rho_g, gapAbs/objScale), the TS best-iterate
  * ranking metric (HsdeNtSdpSolver.ts:431-435).  gapAbs/objScale is gap_inf
  * (the |pObjPure - dObjPure| absolute flag input) over max(1, |pObjPure|).
@@ -412,6 +439,13 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
             arb_addmul(&it->y[i], d.alpha, &d.dy[i], prec);
         arb_addmul(it->tau,   d.alpha, d.dtau,   prec);
         arb_addmul(it->kappa, d.alpha, d.dkappa, prec);
+
+        /* epic.6 / CLAUDE rule 1: zero the just-updated iterate's untrusted radii
+         * BEFORE the stall recompute, so the next iteration's residual /
+         * convergence / NT-scaling / direction all read pure midpoints and the
+         * accumulated radius cannot grow ~1/mu and NaN-corrupt rsqrt/inv near the
+         * PSD boundary.  (Iter-0 starting iterate is already clean.) */
+        iterate_clear_radii(it);
 
         /* Stall detection on homogenized mu (TS:848-852): recompute muNew from
          * the freshly-stepped iterate; if muNew > 0.99*mu_old the step made no

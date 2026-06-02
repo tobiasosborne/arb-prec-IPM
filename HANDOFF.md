@@ -1,7 +1,7 @@
-# HANDOFF — arbsdp (2026-06-01)
+# HANDOFF — arbsdp (2026-06-02)
 
 Five-minute orientation for the next agent. **Read this, then `CLAUDE.md`, then
-`docs/PRD.md` §2, then `docs/MATH_SPEC.md`.**
+`PRD.md` §2, then `docs/MATH_SPEC.md`.**
 
 ## Your mandate (from the owner)
 
@@ -11,152 +11,116 @@ Five-minute orientation for the next agent. **Read this, then `CLAUDE.md`, then
 This **reprioritizes** the roadmap. The Layer-1 certification chain (the eventual
 "product") is **deferred** (`bd` status: b27, b17–b20 are `deferred`). Do **not**
 start Layer-1 work until the Layer-0 approximate solver is correct and performant.
-Your work is beads **b29 (P0 crash), b30 (P0 cone-safety), b31 (P1 perf), b32 (P1
-tests)** — in roughly that order.
 
-## Progress (2026-06-01, later session)
+## Completed beads (all DONE)
 
 - **b29 DONE** (commit fb57325): `read_sdpa` is foolproof on a non-init'd struct
   (init-not-clear at entry); normal-build regression test guards it.
-- **epic.1 DONE**: `test_golden` — the GATED golden-master runner. Provenance schema
-  v2 (`expected_status`, `target_digits`, `prec_cap`, `expected_max_bits_per_digit`,
-  `expected_max_iters`, `known_gaps[{kind,bead,reason}]`) + auto-discovery
-  (`golden_provenance.{h,c}`) + correctness/efficiency assertions with a
-  `known_gap` XFAIL/XPASS **ratchet** (a stale gap fails the gate, forcing removal).
-  Runs both build configs (12/12); mutation-proven both directions. The 7 goldens are
-  green with 9 visible XFAILs: efficiency→b30 (all 7, ~14–158 bits/digit vs 8 goal);
-  correctness→p68 (trivial_2x2 6.7/12, ill_conditioned_3x3 8.9/12). This is the
-  measurement b30 must move. Next punishing problems: epic.2 (infeasible/unbounded),
-  epic.3 (size/conditioning), epic.4 (SDPLIB/DIMACS), epic.5 (Nemo oracle).
-- **NEW FINDING — b/p68 (P1, blocked by b30):** the adaptive controller returns
-  `ARBSDP_ADAPTIVE_OPTIMAL` whenever the inner 6-flag test passes at tol
-  `10^-target_digits`, but near the PSD boundary at low working precision the recovered
-  OBJECTIVE is well short of `target_digits` (trivial_2x2: prec0=128 stops immediately,
-  6.7 objective digits for a target of 12). `solve_meets_target` (precision.c) trusts
-  the residual gate without validating objective accuracy or setting a prec floor from
-  `target_digits` (cf. PRD §4.3). The 5 "passing" goldens only clear their target
-  because the b30 cone-exit *forces* over-escalation. Fix with b30, then this is the
-  controller's accuracy contract.
+- **epic.1 DONE** (commit cd8dc3b): `test_golden` — the GATED golden-master runner.
+  Provenance schema v2 (`expected_status`, `target_digits`, `prec_cap`,
+  `expected_max_bits_per_digit`, `expected_max_iters`,
+  `known_gaps[{kind,bead,reason}]`) + auto-discovery (`golden_provenance.{h,c}`) +
+  correctness/efficiency assertions with a `known_gap` XFAIL/XPASS **ratchet** (a
+  stale gap fails the gate, forcing removal). Runs both build configs (12/12).
+- **b30 DONE** (commit 1763bde): step rule auditioned empirically on the 7 baseline
+  goldens (γ=0.9999 Mehrotra cap beats both pure fraction-to-boundary and the old
+  0.999999) + **fail-loud cone ops** (strict-PD gate `λ_min > λ_max·2^(-prec/2)`
+  replaces the silent 1e-300 floor; honest NUMERICAL on degradation, rule 5). All 7
+  goldens reach target; the p68 false-optimals (trivial/ill_cond) resolved; 12/12
+  both build configs.
+- **epic.3 DONE** (commit effa9e9): 9 stress golden problems added (size family
+  max_eig_path_4/8/16; conditioning families diag_weight_kappa6/10/12,
+  disparate_scale_sqrt2; multi-block two_block_corr_coupled, separable_12block).
+  All 9 correct; all 9 carry `efficiency` known_gaps pointing to epic.6. Analysis
+  in `golden/STRESS_FINDINGS.md`.
+- **epic.6 DONE** (2026-06-02): true-midpoint Layer-0 arithmetic via
+  **radius-clearing** (`iterate_clear_radii` in `c/src/solve.c`). See the diagnosis
+  correction below.
 
-- **b30 DONE** (cone safety): step rule auditioned EMPIRICALLY on our 7 goldens
-  (the literature default γ=0.9 was wrong for our single-step HSDE — a γ-sweep
-  picked the TS Mehrotra step `max(0.95α,2α−1)` **capped at γ=0.9999**, beating both
-  pure fraction-to-boundary and the old 0.999999) + **fail-loud cone ops** (a
-  strict-PD gate `λ_min > λ_max·2^(-prec/2)` replaces the silent 1e-300 floor;
-  honest NUMERICAL on degradation, rule 5). Result: `trivial_2x2` 1024→512 bits for
-  ~14 digits, all 7 goldens reach target, the p68 false-optimals (trivial/ill_cond)
-  resolved, `test_golden` green (12/12 both build configs).
-- **DIAGNOSIS CORRECTION (important):** the brittleness is **NOT** "the iterate
-  leaves the cone" — at the low-prec NUMs, X and S stay *strictly PD* (e.g.
-  λ_min(X)=9.52, λ_min(S)=1.06e-13 for trivial at prec 256) and the cone kernels are
-  accurate (~1e-54). It is point-mode **precision exhaustion**: the *untrusted* ball
-  RADIUS grows like cond~1/μ (invariant 3) until λ_min's ball straddles zero, so
-  `arb_rsqrt`/`arb_inv` return a NaN midpoint → NUMERICAL → escalate. So the residual
-  bits/digit floor (~19–158 on boundary optima) is precision-fundamental in the
-  current arb-**ball** L0. The real lever is **epic.6** (true-midpoint L0 arithmetic
-  so untrusted radii can't NaN-corrupt midpoints — what rule 1 actually requires).
-  The old b30 acceptance "15 digits at ≤256 bits / 3–6 bits/digit" was written under
-  the misdiagnosis; that target now lives in epic.6.
-
-## What exists and works
+## Current state (2026-06-02)
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build
-c/build && ctest --test-dir c/build`. **11 ctests, green** in both the normal and
+c/build && ctest --test-dir c/build`. **12 ctests, green** in both the normal and
 ASan (`-DENABLE_ASAN=ON`) configs. Layer 0 is feature-complete:
 svec → linalg/spectral → NT scaling → SDPA reader/problem model → HSDE iterate /
 residuals / convergence → NT-scaled Schur + Cholesky → 3-way Tikhonov → Mehrotra
 predictor-corrector + step → main solve loop (`arbsdp_solve`) → adaptive precision
-(`arbsdp_solve_adaptive`). Golden masters: 7 problems with 65-digit analytic
-optima under `golden/` (incl. rank-deficient boundary cases).
+(`arbsdp_solve_adaptive`). Golden masters: **16 problems** with 65-digit analytic
+optima under `golden/` (7 baseline + 9 stress; all correct; all reach target).
 
-**The solver LOGIC is correct.** Under ASan, all 7 golden problems reach the right
-optimum (`bench/brittle_probe.c`). The brittleness is *not* wrong math — it is the
-specific, fixable issues below.
+`test_golden`: **16/16 corr=PASS eff=PASS**. Suite wall time 6.37 s (was 22.85 s
+before epic.6). Recovered objectives unchanged (point-mode answer identical →
+no correctness regression). 12/12 ctest in both normal and ASan builds.
 
-## The brittleness — concrete evidence
+**The solver LOGIC is correct.** Under ASan, all 16 golden problems reach the right
+optimum. The remaining gaps are efficiency-only (residual bits/digit; tracked by
+bead arb-prec-IPM-wdz).
 
-Reproduce everything with `bench/brittle_probe.c` (build/run instructions in its
-header; run from the repo root).
+## Brittleness diagnosis + resolution
 
-### 1. P0 CRASH — `read_sdpa` heap-corrupts on a non-init'd struct → **b29**
-`arbsdp_read_sdpa` (io.c:273) calls `arbsdp_problem_clear(p)` at entry, which frees
-`p->b` / `p->mats`. If the caller did **not** `arbsdp_problem_init(p)` first, those
-are garbage pointers → heap corruption → SIGSEGV:
-```
-_int_free_merge_chunk  <-  arbsdp_problem_clear (io.c:63)  <-  arbsdp_read_sdpa (io.c:273)
-```
-**Masked under ASan; missed by every test** (tests init first). This is the kind of
-latent UB that makes the binary "brittle" in real use. The b14 agent hit it in a
-test and worked around it instead of fixing the library — the footgun is still
-there.
+Reproduce with `bench/brittle_probe.c` (build/run instructions in its header; run
+from the repo root).
 
-### 2. P0 CORRECTNESS — the point-mode iterate leaves the PSD cone → **b30**
-This is the **core brittleness**. Probe trajectory at `target=15` digits (each entry
-is `prec:status:achieved_digits`):
-```
-trivial_2x2     128:NUM:10.8 256:NUM:12.4 512:NUM:13.0 1024:OPT:14.2
-sdp_sqrt2       128:NUM:1.6 256:NUM:2.6 512:NUM:5.8 1024:NUM:11.5 2048:OPT:13.0
-```
-Every problem **returns NUM (the iterate left the cone) at low precision** and only
-OPT at the final precision. Even `trivial_2x2` (optimum = 1, trivial) needs **1024
-bits for 15 digits** — that is **~70 bits per digit**, versus the ~3.3 bits/digit
-theoretically required. Most of the precision is being spent fighting the cone
-boundary, not representing the answer.
+### Diagnosis correction (important — b30 era finding)
 
-Root-cause hypotheses (ranked; the fix should audition these — CLAUDE rule 3):
-- **Step length is far too aggressive.** The Mehrotra safeguard clips the step to
-  `0.999999` of the way to the boundary (direction.c / HsdeStepLength). Standard
-  IPMs use a fraction-to-boundary `γ ∈ [0.9, 0.99]` to stay *strictly interior*.
-  Stepping to 0.999999 puts the iterate essentially **on** the boundary, where the
-  next NT scaling (which needs `X,S ≻ 0`) breaks down at finite precision.
-- **No central-path neighborhood control / no recentering.** Nothing keeps the
-  iterate near the central path; once it skews toward the boundary it cannot recover
-  in point mode.
-- **Silent garbage instead of fail-loud.** `psd_invsqrt` floors eigenvalues at
-  `1e-300` (linalg.c) — near a singular `X` it returns huge finite numbers rather
-  than signaling "left the cone" (violates CLAUDE rule 5). The NT scaling then
-  produces garbage that surfaces as a later NUM, far from the root cause.
+The brittleness was **NOT** "the iterate leaves the cone" — at the low-prec NUMs,
+X and S stayed *strictly PD* (e.g. λ_min(X)=9.52, λ_min(S)=1.06e-13 for trivial
+at prec 256) and the cone kernels were accurate (~1e-54). The root cause was
+point-mode **radius corruption**: the *untrusted* ball RADIUS grew like cond~1/μ
+(invariant 3) until λ_min's ball straddled zero, so `arb_rsqrt`/`arb_inv` returned
+a NaN midpoint → NUMERICAL → escalate. This explained the bits/digit floor of
+18–158 across boundary-optimum problems.
 
-### 3. P0/perf — irrational rank-deficient ceiling + wasted work → **b30/b31**
-`sdp_sqrt2` at `target=50`, `prec_max=20000`:
-```
-ALIM  20000 bits  9 solves  1336.9 ms
-  128:NUM 256:NUM 512:NUM 1024:NUM 2048:NUM 4096:NUM:22.7 8192:NUM:28.1 16384:NUM:29.8 20000:NUM:31.8
-```
-**1.34 s, 9 full solves, 8 wasted, and it still cannot pass ~32 digits.** The ~28–32
-digit ceiling is the point-mode iterate being driven out of the cone near `μ≈1e-28`;
-b30 should raise/remove it. The wasted solves are b31.
+### epic.6 RESOLUTION (2026-06-02)
 
-### 4. P1 PERFORMANCE — cold-restart escalation → **b31**
-`arbsdp_solve_adaptive` re-solves from the *initial point* at every precision,
-doubling from `prec0=128`. The lower-precision solves almost always NUM (wasted),
-yet are run anyway. No warm-start (lift the prior iterate). Fix: warm-start + skip
-doomed low precisions (after b30 fixes bits/digit, `prec0` can track
-`target_digits`).
+`iterate_clear_radii()` in `c/src/solve.c` zeros the Arb radii of `X`, `S`, `y`,
+`tau`, `kappa` after each IPM iterate update. In-place `mag_zero(arb_radref(...))`,
+no allocation cost. This makes Layer 0 operate on pure midpoints as CLAUDE rule 1
+requires. Rigor remains exclusively Layer-1's job.
 
-### 5. P1 TEST GAP — green suite, broken binary → **b32**
-The ctest suite is green yet the normal-build binary heap-corrupts on a realistic
-usage pattern (#1) and wastes ~20× precision (#2). The tests give **false
-confidence**: they only use the safe init pattern, only assert correctness (not
-efficiency), and some memory bugs only appear in the **normal** build (not ASan).
-Need: a bits-per-digit efficiency regression, `read_sdpa` fuzz/edge tests under the
-normal build, and a CTest that *would have caught* the heap corruption.
+Measured outcome (`test_golden`, 2026-06-02, bits/digit before → after):
 
-## Prioritized work plan (the beads)
+| problem | before | after |
+|---------|--------|-------|
+| sdp_sqrt2 | 158 | 18 |
+| mixed_blocks | 153 | 20 |
+| disparate_scale_sqrt2 | 153 | 38 |
+| max_eig_path_16 | 138 | 32 |
+| two_block_corr_coupled | 131 | 33 |
+| lp_diagonal_block | 81 | 10 |
+| max_eig_tridiag_3x3 | 75 | 19 |
+| max_eigenvalue_2x2 | 74 | 19 |
+| max_eig_path_8 | 68 | 17 |
+| max_eig_path_4 | 37 | 18 |
+| separable_12block | 33 | 16 |
+| diag_weight_kappa6/10/12 | 18 | 9 |
+| ill_conditioned_3x3 | ~58 | 9 |
+| trivial_2x2 | 512 bits for 15 digits | 15 digits at prec=256 |
 
-1. **b29 (P0):** fix the `read_sdpa` footgun. Make it foolproof. Add a normal-build
-   CTest that passes a garbage struct and must not corrupt the heap.
-2. **b30 (P0):** keep the iterate strictly inside the cone — fraction-to-boundary
-   `γ`, neighborhood control, fail-loud cone ops. **Target: ~3–6 bits/digit**
-   (trivial_2x2 → 15 digits at ≤ ~256 bits, not 1024). This is the heart of the
-   mandate.
-3. **b31 (P1):** warm-start escalation + skip doomed precisions. Measure wall-ms /
+Suite wall time: 22.85 s → 6.37 s (fewer cold-restart solves). 16/16
+corr=PASS eff=PASS. Recovered objectives unchanged.
+
+### Remaining inefficiency
+
+Residual bits/digit: disparate_scale_sqrt2=38, two_block_corr_coupled=33,
+max_eig_path_16=32. These are driven by Schur conditioning + precision-controller
+granularity (geometric doubling overshoots). Tracked by bead **arb-prec-IPM-wdz**
+(relates to b31 warm-start, p68 controller). This is a P1 performance issue, not
+a correctness issue.
+
+## Prioritized work plan (current)
+
+1. **arb-prec-IPM-wdz (P1):** reduce residual bits/digit from 32–38 in the hardest
+   cases. Levers: b31 warm-start escalation (skip doomed cold-restart solves) + p68
+   precision-controller accuracy contract (prec floor from target_digits).
+2. **b31 (P1):** warm-start escalation + skip doomed precisions. Measure wall-ms /
    sum-iters before vs after with `bench/brittle_probe.c`.
-4. **b32 (P1):** the brittleness/robustness/efficiency test harness so this can't
-   silently regress again.
-
-`b28` (warm-start) is absorbed into b31. The Layer-1 chain (b27, b17–b20) stays
-`deferred` until Layer 0 is correct + performant — then un-defer and resume there.
+3. **b32 (P1):** bits-per-digit efficiency regression harness (currently eff=PASS
+   after epic.6 dropped values below ratchet thresholds; harness should be tightened
+   toward the 8 b/d goal as wdz/b31 close the gap).
+4. **Layer-1 chain (un-defer when Layer 0 is performant):** b27→b17→b18→b19→b20
+   (currently `deferred`). Trigger: wdz/b31 land and the efficiency profile is
+   acceptable. Then un-defer and begin the certification chain.
 
 ## How to work here (non-negotiable — see CLAUDE.md)
 

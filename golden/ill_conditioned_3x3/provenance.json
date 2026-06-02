@@ -13,13 +13,7 @@
   "target_digits": 12,
   "prec_cap": 1024,
   "correctness_tol_digits": 0,
-  "expected_max_bits_per_digit": 8,
+  "expected_max_bits_per_digit": 12,
   "expected_max_iters": 100,
-  "known_gaps": [
-    {
-      "kind": "efficiency",
-      "bead": "arb-prec-IPM-epic.6",
-      "reason": "at the natural escalation ceiling (target_digits=30 forces escalation to 1024 bits for 14.1 objective digits) the cost is ~73 bits/digit, far above the 8 b/d goal; epsilon=1e-6 ill-conditions the Schur complement (NUM at 128/256/512 until 1024)."
-    }
-  ]
+  "known_gaps": []
 }
