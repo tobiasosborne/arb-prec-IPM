@@ -107,6 +107,18 @@ target_link_libraries(test_linalg PRIVATE arbsdp)
 
 add_test(NAME test_linalg COMMAND test_linalg)
 
+add_executable(test_certify test/test_certify.c)
+
+target_include_directories(test_certify
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_certify PRIVATE arbsdp)
+
+add_test(NAME test_certify COMMAND test_certify)
+
 add_executable(test_ntscaling test/test_ntscaling.c)
 
 target_include_directories(test_ntscaling
