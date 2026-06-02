@@ -1,6 +1,7 @@
 /*
  * test/test_certify.c -- BALL-MODE (RIGOROUS, Layer-1) tests for certify.c:
- * arbsdp_verified_psd / arbsdp_gershgorin_lower_bound / arbsdp_lambda_min_lower_bound.
+ * arbsdp_verified_psd / arbsdp_gershgorin_lower_bound / arbsdp_lambda_min_lower_bound
+ * / arbsdp_dual_residual / the arbsdp_apriori bound API.
  *
  * RED-GREEN TDD (CLAUDE.md rule 9): each block is written before the impl it
  * exercises; the target link-fails or aborts (assert(0) stub) first, then passes.
@@ -10,21 +11,32 @@
  * lambda_min is a P0 bug.  Every known-spectrum fixture below asserts BOTH
  * rigor (d <= true lambda_min, checked at d's UPPER endpoint so even radius cannot
  * cheat) AND tightness (true - d < a tol that proves the bisection converged, not
- * stalled).
+ * stalled).  The dual residual Z must be a true ball ENCLOSURE: each returned
+ * Z[b] entry's ball must CONTAIN the exact C[b] - sum_i y_i A_i[b] (rule 2).
  *
  * Arb memory discipline (CLAUDE.md rule 7): every init has a matching clear.
  */
 
+/* mkstemp/close are POSIX; with -std=c11 they need the feature-test macro to be
+ * declared before any standard header (matches test_io.c). */
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #include <flint/arb.h>
 #include <flint/arb_mat.h>
 
 #include "arbsdp/certify.h"
 #include "arbsdp/linalg.h"
+#include "arbsdp/svec.h"
 
 #define PREC 256
+/* Certification precision: the caller passes prec_c = prec + 128 (MATH_SPEC §10,
+ * decision 2; bead notes).  The dual-residual tests run at this prec_c. */
+#define PREC_C (PREC + 128)
 
 static int failures = 0;
 
@@ -502,6 +514,309 @@ test_eig_crosscheck(void)
     arb_mat_clear(Q);
 }
 
+/* ----- Step 6: arbsdp_dual_residual ENCLOSURE (bead b18) ------------------ *
+ * Z[b] = C[b] - sum_i y_i A_i[b] must be a true ball ENCLOSURE (CLAUDE.md rule
+ * 2): each returned entry's ball must CONTAIN the independently-computed exact
+ * value.  We build a 1-block 2x2 problem with KNOWN integer C, A_1, A_2 via a
+ * temp .dat-s parsed through the real materialization path (arbsdp_read_sdpa ->
+ * arbsdp_problem_block_mat), then check the enclosure entry by entry.
+ *
+ * Problem (file/SDPA sign, matno 0 = C, 1..m = A_i; off-diag stored verbatim,
+ * block_mat writes A_{ij}=A_{ji}=v):
+ *   C   = [[5, 2],[2, 7]]
+ *   A_1 = [[1, 0],[0, 0]]
+ *   A_2 = [[0, 1],[1, 3]]
+ * With y = (3, 1/2)  (both exact in binary):
+ *   Z = C - 3*A_1 - (1/2)*A_2
+ *     = [[5-3, 2-1/2],[2-1/2, 7-3/2]] = [[2, 3/2],[3/2, 11/2]].
+ */
+
+/* Write `content` to a fresh temp .dat-s; return the owned path (caller frees) or
+ * NULL.  Mirrors test_io.c's temp-file pattern. */
+static char *
+write_temp_dats(const char *content)
+{
+    char tmpl[] = "/tmp/arbsdp_certify_XXXXXX";
+    int fd = mkstemp(tmpl);
+    FILE *f;
+    char *path;
+    if (fd < 0)
+        return NULL;
+    f = fdopen(fd, "w");
+    if (f == NULL) {
+        close(fd);
+        return NULL;
+    }
+    fputs(content, f);
+    fclose(f);
+    path = malloc(strlen(tmpl) + 1);
+    if (path != NULL)
+        strcpy(path, tmpl);
+    return path;
+}
+
+/* Assert Z[b]_entry encloses the exact value `exact_str` (CLAUDE.md rule 2). */
+static void
+check_encloses(const arb_mat_t Z, slong r, slong c, const char *exact_str,
+               const char *label)
+{
+    arb_t e;
+    arb_init(e);
+    arb_set_str(e, exact_str, PREC_C);
+    CHECK(arb_contains(arb_mat_entry(Z, r, c), e), label);
+    arb_clear(e);
+}
+
+static void
+test_dual_residual(void)
+{
+    /* (1) full enclosure with y = (3, 1/2). */
+    {
+        const char *dats =
+            "* test problem b18 dual residual\n"
+            "2\n"          /* m = 2 constraints */
+            "1\n"          /* nblocks = 1 */
+            "2\n"          /* block 0 is dense PSD 2x2 */
+            "1.0 2.0\n"    /* b vector (unused by dual_residual) */
+            "0 1 1 1 5\n"  /* C_11 = 5 */
+            "0 1 1 2 2\n"  /* C_12 = C_21 = 2 */
+            "0 1 2 2 7\n"  /* C_22 = 7 */
+            "1 1 1 1 1\n"  /* A_1: (1,1) = 1 */
+            "2 1 1 2 1\n"  /* A_2: (1,2)=(2,1) = 1 */
+            "2 1 2 2 3\n"; /* A_2: (2,2) = 3 */
+        char *path = write_temp_dats(dats);
+        arbsdp_problem p;
+        arb_mat_t Z[1];
+        arb_ptr y;
+        double maxrad = 0.0;
+
+        CHECK(path != NULL, "dual_residual: temp file creation");
+        arbsdp_problem_init(&p);
+        CHECK(arbsdp_read_sdpa(&p, path) == 0, "dual_residual: parse temp .dat-s");
+
+        arb_mat_init(Z[0], 2, 2);
+        y = _arb_vec_init(p.m);
+        arb_set_si(&y[0], 3);                 /* y_1 = 3 */
+        arb_set_d(&y[1], 0.5);                /* y_2 = 1/2 (exact binary) */
+
+        arbsdp_dual_residual(Z, &p, y, PREC_C);
+
+        /* Exact Z = [[2, 3/2],[3/2, 11/2]] -- assert each ball ENCLOSES it. */
+        check_encloses(Z[0], 0, 0, "2",   "dual_residual Z_00 encloses 2");
+        check_encloses(Z[0], 0, 1, "1.5", "dual_residual Z_01 encloses 3/2");
+        check_encloses(Z[0], 1, 0, "1.5", "dual_residual Z_10 encloses 3/2");
+        check_encloses(Z[0], 1, 1, "5.5", "dual_residual Z_11 encloses 11/2");
+
+        /* Symmetry: Z_01 == Z_10 (downstream Cholesky reads the lower triangle). */
+        CHECK(arb_equal(arb_mat_entry(Z[0], 0, 1), arb_mat_entry(Z[0], 1, 0)),
+              "dual_residual: Z must be symmetric (Z_01 == Z_10)");
+
+        /* Report the enclosure radius magnitude (rule 11: concrete numbers). */
+        for (slong i = 0; i < 2; i++)
+            for (slong j = 0; j < 2; j++) {
+                double rad = mag_get_d(arb_radref(arb_mat_entry(Z[0], i, j)));
+                if (rad > maxrad)
+                    maxrad = rad;
+            }
+        printf("  [dual_res] 2x2 y=(3,1/2)   max entry radius = %.3e (prec_c=%d)\n",
+               maxrad, PREC_C);
+
+        _arb_vec_clear(y, p.m);
+        arb_mat_clear(Z[0]);
+        arbsdp_problem_clear(&p);
+        free(path);
+    }
+
+    /* (1b) NON-binary-exact y forces a strictly-positive radius, so the
+     * "ball CONTAINS the exact value" claim actually exercises rounding (rule 8:
+     * the exact-input case above has radius 0 and cannot catch a rounding bug).
+     * y = (1/10, 1/3) (neither binary-exact).  Exact Z:
+     *   Z_00 = 5 - (1/10)*1               = 49/10
+     *   Z_01 = 2 - (1/3)*1                = 5/3
+     *   Z_11 = 7 - (1/3)*3               = 6
+     * The exact targets are recomputed INDEPENDENTLY in arb at a much HIGHER
+     * precision (2*PREC_C) so the reference ball is ~2^-PREC_C tighter than Z's,
+     * making arb_contains a genuine enclosure test (CLAUDE.md rule 8). */
+    {
+        const char *dats =
+            "* test problem b18 dual residual non-exact y\n"
+            "2\n"
+            "1\n"
+            "2\n"
+            "1.0 2.0\n"
+            "0 1 1 1 5\n"
+            "0 1 1 2 2\n"
+            "0 1 2 2 7\n"
+            "1 1 1 1 1\n"
+            "2 1 1 2 1\n"
+            "2 1 2 2 3\n";
+        char *path = write_temp_dats(dats);
+        arbsdp_problem p;
+        arb_mat_t Z[1];
+        arb_ptr y;
+        arb_t e, third, tenth;
+        double maxrad = 0.0;
+
+        CHECK(path != NULL, "dual_residual non-exact: temp file creation");
+        arbsdp_problem_init(&p);
+        CHECK(arbsdp_read_sdpa(&p, path) == 0,
+              "dual_residual non-exact: parse .dat-s");
+
+        arb_mat_init(Z[0], 2, 2);
+        y = _arb_vec_init(p.m);
+        arb_init(e);
+        arb_init(third);
+        arb_init(tenth);
+
+        /* y_1 = 1/10, y_2 = 1/3 at prec_c (NOT exact). */
+        arb_set_si(tenth, 1);
+        arb_div_si(tenth, tenth, 10, PREC_C);
+        arb_set(&y[0], tenth);
+        arb_set_si(third, 1);
+        arb_div_si(third, third, 3, PREC_C);
+        arb_set(&y[1], third);
+
+        arbsdp_dual_residual(Z, &p, y, PREC_C);
+
+        /* Reference exacts at 2*PREC_C (much tighter than Z's enclosure). */
+        arb_set_si(e, 49);                          /* Z_00 = 49/10 */
+        arb_div_si(e, e, 10, 2 * PREC_C);
+        CHECK(arb_contains(arb_mat_entry(Z[0], 0, 0), e),
+              "dual_residual non-exact: Z_00 encloses 49/10");
+
+        arb_set_si(e, 5);                            /* Z_01 = 5/3 */
+        arb_div_si(e, e, 3, 2 * PREC_C);
+        CHECK(arb_contains(arb_mat_entry(Z[0], 0, 1), e),
+              "dual_residual non-exact: Z_01 encloses 5/3");
+
+        arb_set_si(e, 6);                            /* Z_11 = 7 - 3*(1/3) = 6 */
+        CHECK(arb_contains(arb_mat_entry(Z[0], 1, 1), e),
+              "dual_residual non-exact: Z_11 encloses 6");
+
+        for (slong i = 0; i < 2; i++)
+            for (slong j = 0; j < 2; j++) {
+                double rad = mag_get_d(arb_radref(arb_mat_entry(Z[0], i, j)));
+                if (rad > maxrad)
+                    maxrad = rad;
+            }
+        CHECK(maxrad > 0.0,
+              "dual_residual non-exact: radius is strictly positive (rounding exercised)");
+        printf("  [dual_res] 2x2 y=(1/10,1/3) max entry radius = %.3e (prec_c=%d)\n",
+               maxrad, PREC_C);
+
+        arb_clear(e);
+        arb_clear(third);
+        arb_clear(tenth);
+        _arb_vec_clear(y, p.m);
+        arb_mat_clear(Z[0]);
+        arbsdp_problem_clear(&p);
+        free(path);
+    }
+
+    /* (2) y = 0 -> Z[b] == C[b] (enclosure contains C). */
+    {
+        const char *dats =
+            "* test problem b18 dual residual y=0\n"
+            "2\n"
+            "1\n"
+            "2\n"
+            "1.0 2.0\n"
+            "0 1 1 1 5\n"
+            "0 1 1 2 2\n"
+            "0 1 2 2 7\n"
+            "1 1 1 1 1\n"
+            "2 1 1 2 1\n"
+            "2 1 2 2 3\n";
+        char *path = write_temp_dats(dats);
+        arbsdp_problem p;
+        arb_mat_t Z[1];
+        arb_ptr y;
+
+        CHECK(path != NULL, "dual_residual y=0: temp file creation");
+        arbsdp_problem_init(&p);
+        CHECK(arbsdp_read_sdpa(&p, path) == 0, "dual_residual y=0: parse .dat-s");
+
+        arb_mat_init(Z[0], 2, 2);
+        y = _arb_vec_init(p.m);   /* all zero from _arb_vec_init */
+
+        arbsdp_dual_residual(Z, &p, y, PREC_C);
+
+        check_encloses(Z[0], 0, 0, "5", "dual_residual y=0: Z_00 == C_00 = 5");
+        check_encloses(Z[0], 0, 1, "2", "dual_residual y=0: Z_01 == C_01 = 2");
+        check_encloses(Z[0], 1, 1, "7", "dual_residual y=0: Z_11 == C_11 = 7");
+
+        _arb_vec_clear(y, p.m);
+        arb_mat_clear(Z[0]);
+        arbsdp_problem_clear(&p);
+        free(path);
+    }
+}
+
+/* ----- Step 7: arbsdp_apriori bound API (bead b18) ------------------------ *
+ * CLAUDE.md invariant 5 (NO silent boundedness): the *_set FLAG -- not a
+ * sentinel value -- is the source of truth for "supplied".  MUTATION (rule 8):
+ * an UNSET xbar[b] is distinguishable from a SET xbar[b] that holds a huge
+ * (near-+inf) value; the flag, never the value, decides. */
+static void
+test_apriori(void)
+{
+    arbsdp_apriori ab;
+    arb_t v, huge;
+
+    arb_init(v);
+    arb_init(huge);
+
+    arbsdp_apriori_init(&ab, 3);
+
+    /* Init: all bounds UNSET. */
+    CHECK(ab.nblocks == 3, "apriori: nblocks recorded");
+    CHECK(ab.xbar_set[0] == 0 && ab.xbar_set[1] == 0 && ab.xbar_set[2] == 0,
+          "apriori init: all xbar UNSET");
+    CHECK(ab.ybar_set == 0, "apriori init: ybar UNSET");
+
+    /* Set xbar[1] = 4.25; only block 1 toggles. */
+    arb_set_d(v, 4.25);
+    arbsdp_apriori_set_xbar(&ab, 1, v);
+    CHECK(ab.xbar_set[1] == 1, "apriori: set_xbar toggles xbar_set[1]");
+    CHECK(ab.xbar_set[0] == 0 && ab.xbar_set[2] == 0,
+          "apriori: set_xbar[1] leaves other blocks UNSET");
+    CHECK(arb_equal(&ab.xbar[1], v), "apriori: xbar[1] stores the value");
+
+    /* MUTATION (invariant 5): a SET huge xbar[2] is a FINITE bound, still
+     * distinguishable from the UNSET xbar[0] by the FLAG (not by value). */
+    arb_set_d(huge, 1e300);
+    arbsdp_apriori_set_xbar(&ab, 2, huge);
+    CHECK(ab.xbar_set[2] == 1, "apriori MUTATION: set huge xbar[2] is SET");
+    CHECK(ab.xbar_set[0] == 0, "apriori MUTATION: unset xbar[0] stays UNSET");
+    CHECK(arb_is_finite(&ab.xbar[2]),
+          "apriori MUTATION: a set huge xbar[2] is FINITE, not +inf");
+    /* The discriminator is the flag: block 0 (unset) and block 2 (set huge) carry
+     * DIFFERENT flags even though neither value is +inf. */
+    CHECK(ab.xbar_set[0] != ab.xbar_set[2],
+          "apriori MUTATION: flag (not value) distinguishes unset from set-huge");
+
+    /* ybar set/unset. */
+    arb_set_si(v, 9);
+    arbsdp_apriori_set_ybar(&ab, v);
+    CHECK(ab.ybar_set == 1, "apriori: set_ybar toggles ybar_set");
+    CHECK(arb_equal(ab.ybar, v), "apriori: ybar stores the value");
+
+    arbsdp_apriori_clear(&ab);
+    /* After clear: re-zeroed (idempotent, rule 7). */
+    CHECK(ab.nblocks == 0 && ab.xbar == NULL && ab.xbar_set == NULL
+              && ab.ybar_set == 0,
+          "apriori clear: struct re-zeroed");
+
+    /* nblocks == 0 edge case: init/clear must not allocate/free garbage. */
+    arbsdp_apriori_init(&ab, 0);
+    CHECK(ab.xbar == NULL && ab.xbar_set == NULL && ab.ybar_set == 0,
+          "apriori init(0): no per-block allocation, ybar unset");
+    arbsdp_apriori_clear(&ab);
+
+    arb_clear(v);
+    arb_clear(huge);
+}
+
 int
 main(void)
 {
@@ -510,6 +825,8 @@ main(void)
     test_lambda_min_bracket_coarse();
     test_lambda_min_bisection();
     test_eig_crosscheck();
+    test_dual_residual();
+    test_apriori();
 
     if (failures != 0) {
         fprintf(stderr, "test_certify: %d check(s) FAILED\n", failures);

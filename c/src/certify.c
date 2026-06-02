@@ -15,8 +15,10 @@
 #include <flint/arb.h>
 #include <flint/arb_mat.h>
 #include <flint/arf.h>
+#include <flint/flint.h>
 
 #include "arbsdp/certify.h"
+#include "arbsdp/problem.h"
 #include "arbsdp/svec.h"
 
 /* ---------------------------------------------------------------------------
@@ -365,4 +367,162 @@ done:
     arb_clear(gersh);
     arb_clear(abs_g);
     arf_clear(scale);
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_dual_residual -- per-block dual residual Z[b] = C[b] - sum_i y_i A_i[b]
+ * in BALL arithmetic (bead arb-prec-IPM-b18).
+ *
+ * Jansson-Chaykin-Keil 2007 (SIAM J. Numer. Anal. 46(1):180-200): the Layer-1
+ * lower bound rests on the dual slack Z = C - sum_i y_i A_i and its lambda_min
+ * floor.  Z must be a rigorous ENCLOSURE (CLAUDE.md rule 2): its ball must
+ * contain the exact residual for the supplied y.
+ *
+ * Materialization REUSE (no re-parse; same helper as iterate.c::apply_At):
+ * arbsdp_problem_block_mat(., p, matno, b, prec) builds the symmetric block of
+ * matno (0 = C_file, 1..m = A_matno) at `prec`, each entry a correctly-rounded
+ * ball of the stored decimal (problem.h banner).
+ *
+ * The linear combination is accumulated PER ENTRY with arb_dot (one rounding for
+ * the whole length-m dot product, the tightest rigorous enclosure FLINT offers):
+ *     Z[b][r,c] = C[b][r,c] - sum_{i=0}^{m-1} y[i] * A_{i+1}[b][r,c].
+ * arb_dot(res, init=C, subtract=1, x=y, y=avec, len=m) returns
+ *     res = C - sum y[i]*avec[i]
+ * with the radius bounding all rounding (FLINT arb_dot contract).
+ *
+ * SIGN-AGNOSTIC (REPORTED to b19): C is taken at matno 0 with the FILE sign (NOT
+ * the solver's C_int = -C_file), and the A_i at matno 1..m with the file sign,
+ * exactly matching arbsdp_apply_At.  This routine does not choose/purify the sign
+ * of y -- that is b19's decision (certify.h SIGN note).
+ *
+ * Memory (CLAUDE.md rule 7): Cblk + the m A-blocks + the length-m gather vector
+ * are scoped here and cleared; the caller owns Z's init/clear.
+ * ------------------------------------------------------------------------- */
+void
+arbsdp_dual_residual(arb_mat_t *Z, const arbsdp_problem *p, arb_srcptr y,
+                     slong prec)
+{
+    int m, nb;
+
+    assert(Z != NULL && "dual_residual: Z must be non-NULL");
+    assert(p != NULL && "dual_residual: p must be non-NULL");
+    /* y may be NULL only if m == 0 (no linear combination terms). */
+
+    m = p->m;
+    nb = p->nblocks;
+    assert((m == 0 || y != NULL) && "dual_residual: y must be non-NULL when m>0");
+
+    for (int b = 0; b < nb; b++) {
+        slong n = p->block_sizes[b] < 0 ? -p->block_sizes[b]
+                                        : p->block_sizes[b];
+        arb_mat_t Cblk;
+        arb_mat_struct *Ablk = NULL;   /* m materialized A_i[b] blocks */
+        arb_ptr avec = NULL;           /* length-m gather of A_i[b][r,c] */
+
+        assert(arb_mat_nrows(Z[b]) == n && arb_mat_ncols(Z[b]) == n
+               && "dual_residual: Z[b] must be n x n");
+
+        arb_mat_init(Cblk, n, n);
+        arbsdp_problem_block_mat(Cblk, p, 0, b, prec);   /* C_file block (matno 0) */
+
+        if (m > 0) {
+            Ablk = flint_malloc((size_t) m * sizeof *Ablk);
+            avec = _arb_vec_init(m);
+            for (int i = 0; i < m; i++) {
+                arb_mat_init(&Ablk[i], n, n);
+                arbsdp_problem_block_mat(&Ablk[i], p, i + 1, b, prec); /* A_{i+1} */
+            }
+        }
+
+        /* Z[b][r,c] = C[b][r,c] - sum_i y[i] * A_{i+1}[b][r,c], one rounding per
+         * entry (arb_dot). */
+        for (slong r = 0; r < n; r++) {
+            for (slong c = 0; c < n; c++) {
+                if (m > 0) {
+                    for (int i = 0; i < m; i++)
+                        arb_set(&avec[i], arb_mat_entry(&Ablk[i], r, c));
+                    arb_dot(arb_mat_entry(Z[b], r, c),
+                            arb_mat_entry(Cblk, r, c), /* initial = C[b][r,c] */
+                            1,                          /* subtract the dot product */
+                            y, 1, avec, 1, m, prec);
+                } else {
+                    arb_set(arb_mat_entry(Z[b], r, c), arb_mat_entry(Cblk, r, c));
+                }
+            }
+        }
+
+        /* Downstream verified-Cholesky / lambda_min read only the lower triangle
+         * (certify.c above); make Z[b] exactly symmetric.  C and the A_i are each
+         * symmetric (block_mat writes A_{ij}=A_{ji}), so this only re-rounds. */
+        arbsdp_symmetrize(Z[b], prec);
+
+        arb_mat_clear(Cblk);
+        if (m > 0) {
+            for (int i = 0; i < m; i++)
+                arb_mat_clear(&Ablk[i]);
+            flint_free(Ablk);
+            _arb_vec_clear(avec, m);
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_apriori -- a-priori bound storage (bead arb-prec-IPM-b18).
+ *
+ * CLAUDE.md invariant 5 (NO silent boundedness): the SET/UNSET distinction is the
+ * *_set flag, NOT a sentinel value -- so an explicitly-set huge xbar[b] is a
+ * FINITE bound, distinct from "unset" (which b19 reads as +inf -> lb = -inf for
+ * that block).  This module only STORES; b19 consumes.
+ *
+ * Memory (CLAUDE.md rule 7): init allocates xbar (length nblocks), xbar_set
+ * (length nblocks), and ybar; clear frees all three and re-zeros.
+ * ------------------------------------------------------------------------- */
+void
+arbsdp_apriori_init(arbsdp_apriori *ab, int nblocks)
+{
+    assert(ab != NULL && "apriori_init: ab must be non-NULL");
+    assert(nblocks >= 0 && "apriori_init: nblocks must be >= 0");
+
+    ab->nblocks = nblocks;
+    ab->xbar = (nblocks > 0) ? _arb_vec_init(nblocks) : NULL;
+    ab->xbar_set = (nblocks > 0)
+                       ? flint_calloc((size_t) nblocks, sizeof *ab->xbar_set)
+                       : NULL;
+    arb_init(ab->ybar);
+    ab->ybar_set = 0;
+}
+
+void
+arbsdp_apriori_clear(arbsdp_apriori *ab)
+{
+    assert(ab != NULL && "apriori_clear: ab must be non-NULL");
+
+    if (ab->xbar != NULL)
+        _arb_vec_clear(ab->xbar, ab->nblocks);
+    flint_free(ab->xbar_set);   /* flint_free(NULL) is a no-op */
+    arb_clear(ab->ybar);
+
+    ab->nblocks = 0;
+    ab->xbar = NULL;
+    ab->xbar_set = NULL;
+    ab->ybar_set = 0;
+}
+
+void
+arbsdp_apriori_set_xbar(arbsdp_apriori *ab, int b, const arb_t value)
+{
+    assert(ab != NULL && "apriori_set_xbar: ab must be non-NULL");
+    assert(b >= 0 && b < ab->nblocks && "apriori_set_xbar: b out of range");
+
+    arb_set(&ab->xbar[b], value);
+    ab->xbar_set[b] = 1;
+}
+
+void
+arbsdp_apriori_set_ybar(arbsdp_apriori *ab, const arb_t value)
+{
+    assert(ab != NULL && "apriori_set_ybar: ab must be non-NULL");
+
+    arb_set(ab->ybar, value);
+    ab->ybar_set = 1;
 }

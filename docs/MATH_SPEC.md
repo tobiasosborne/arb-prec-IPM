@@ -689,37 +689,81 @@ The a-priori bound is a FIRST-CLASS API input (PRD.md §4.6).  For the primary
 use cases it is free: density matrices have tr = 1, normalized moment matrices
 have a bounded [1,1] entry.
 
-### 5.5 Rigorous upper bound (symmetric construction)
+### 5.5 Rigorous upper bound (dual-side symmetric mirror of §5.4)
 
-The symmetric dual-side upper bound on `max <C, X>` comes from an approximate
-primal-feasible X_tilde.
+The upper bound on `p*_ext = max <C_file, X>` is the exact dual-side MIRROR of the
+§5.4 lower bound. It consumes the SAME a-priori TRACE bound `xbar_b >= tr(X*_b)`
+(NOT a dual-norm bound) and reuses the shipped verified-Cholesky-shift kernel
+(`arbsdp_lambda_min_lower_bound`, b17). No primal-PSD certification is required,
+honoring CLAUDE invariant 1 (certify from the dual side).
 
-A rigorous upper bound arises from the KKT slackness:
+**Master identity (for EVERY feasible X and ANY y in R^m):**
 
-    max <C, X>  <=  b^T y_tilde + rigorous-bound-on-(<C, X_tilde> - b^T y_tilde + primal-gap)
+    <C_file, X> = <C_file - sum_i y_i A_i, X> + sum_i y_i <A_i, X>
+                = <Z, X> + b^T y ,      where  Z := C_file - sum_i y_i A_i.
 
-The exact construction is:
+(uses <A_i,X> = b_i). Splitting per block and bounding the Rayleigh-trace product
+both ways gives, for X_b >= 0 with tr(X_b) <= xbar_b:
 
-1. Form the primal residual r_p_i = <A_i, X_tilde> - b_i in ball arithmetic.
-2. Form the primal objective value <C, X_tilde> in ball arithmetic.
-3. With a bound `y_bar >= ||y||` (dual norm bound), bound the violation:
+    sum_b min(0, lambda_min(Z_b)) xbar_b  <=  <Z,X>  <=  sum_b max(0, lambda_max(Z_b)) xbar_b.
 
-    <C, X_tilde> - b^T y_tilde  <=  <C, X_tilde> - b^T y_tilde
-                                  + correction-from-feasibility-residual
+Adding `b^T y` and maximizing over feasible X yields the two-sided bracket; the
+lower half is §5.4, the upper half is:
 
-Full derivation (Jansson-Chaykin-Keil 2007, Theorem 3.2 dual side):
-Given the dual feasibility `Z = C - sum_i y_i A_i + Delta` where Delta >= 0
-(in the PSD sense), and primal feasibility <A_i, X> = b_i + r_p_i:
+**Theorem 5.5 (rigorous upper bound, UB-A).** Let `y_ext = -y_int`,
+`y_int = it->y / it->tau` (tau-purified internal dual; §5.4 / sign banner), and
+`Z_ext^b = C_file^b - sum_i (y_ext)_i A_i^b` in ball arithmetic. Let
+`dhi_b >= lambda_max(Z_ext^b)` be the rigorous upper bound computed via
+`dhi_b = -arbsdp_lambda_min_lower_bound(-Z_ext^b, prec_c)` (the verified Cholesky
+shift on the NEGATED block; `lambda_max(Z) = -lambda_min(-Z)`). Then:
 
-    b^T y  >=  <C, X> - <Delta, X> - sum_i y_i r_p_i
-    <C, X> <=  b^T y + <Delta, X> + ||y||_2 * ||r_p||_2
+    p*_ext  <=  b^T y_ext  +  sum_{b=1}^{nb}  max(0, dhi_b) * xbar_b  =:  ub_ext.
 
-This requires x_bar (to bound <Delta, X> via lambda_max(Delta) * tr(X)) and
-y_bar (to bound the residual correction).  See Jansson-Chaykin-Keil 2007 for
-the complete proof.
+`ub_ext` is taken at the Arb UPPER endpoint of the assembled ball. If for some
+block `dhi_b > 0` and `xbar_set[b] = 0`, then `ub_ext = +inf` (reported honestly,
+mirroring `lb = -inf`; CLAUDE invariant 5, rule 2). The clamp `max(0, dhi_b)`
+(vs. `min(0, dlo_b)` for the lower bound) is the correct safe over-estimate of
+`<Z_b,X_b>` when `Z_b` is negative definite (the over-estimate -> 0 as tr X_b -> 0).
 
-The `certify.c` module must implement both bounds (lower and upper) to produce
-the rigorous bracket [lb, ub].
+**Proof.** Master identity + Rayleigh-trace inequality + maximize over feasible X.
+A successful ball Cholesky of `(-Z_ext^b - s I)` proves `-Z_ext^b - s I >= 0`, i.e.
+`lambda_min(-Z_ext^b) >= s`, i.e. `lambda_max(Z_ext^b) <= -s = dhi_b` (Rump 2006
+Cor 2.4; FLINT `arb_mat_cho` contract). QED.
+
+**Sign contract (P0).** Both `lb_ext` (§5.4) and `ub_ext` consume the SAME
+external dual `y_ext = -y_int` and the SAME file-sign data (C_file, A_i) via
+`arbsdp_dual_residual`. Passing `y_int` instead forms `Z_int = -Z_ext`, swaps
+lambda_min <-> lambda_max, and yields a bracket that EXCLUDES the optimum.
+Independent cross-check (defends against a double flip): the §5.4 lower bound run
+on the INTERNAL min-problem `p*_int = min <C_int,X>` gives
+`p*_int >= b^T y_int + sum_b min(0, dlo(Z_int^b)) xbar_b`; negating
+(`p*_ext = -p*_int`, with `Z_int = -Z_ext`) reproduces `ub_ext` exactly.
+
+**Tightness.** A single `y` cannot make BOTH bounds tight for a max problem: at the
+solver's converged dual (`y_ext -> y*`), `Z_ext` sits on the PSD boundary so
+`lambda_max(Z_ext) -> 0+` and `ub_ext -> p*` (TIGHT), while `lambda_min(Z_ext) << 0`
+makes `lb_ext` loose but still valid (contains p*). The b19 deliverable is the
+rigorous BRACKET (rigor); tightening `lb_ext` is a Layer-2 / dual-correction concern.
+
+**Secondary upper bound (UB-B, ybar fallback; NOT implemented in b19).** When a
+tight primal iterate and a dual-norm bound `ybar_i >= |y*_i|` are available, the
+Jansson 2009 Thm 4.2 / VSDP `vsdpup` residual form applies:
+
+    p*_ext  <=  <C_file, Xt+>  +  ybar^T r,
+        Xt+ = block-wise PSD projection of the approximate primal
+              (X_b shifted by |min(0, lambda_min(X_b))| I),
+        r_i >= |<A_i, Xt+> - b_i|   (rigorous primal residual, ball upper endpoint).
+
+UB-B needs primal-PSD-projection machinery arbsdp does not yet have; it is the
+right tool only when `xbar` is unavailable but `ybar` + a near-feasible primal
+are. RE-SCOPE: the FINITE upper bound needs `xbar` (via UB-A), not `ybar`; the
+`arbsdp_apriori.ybar` field and §10 decision 3 are retained for UB-B only.
+Tracked: bead arb-prec-IPM-9tm (UB-B fallback).
+
+**References.** Jansson-Chaykin-Keil 2007 (Thm 3.2 lower; UB-A is its dual-side
+trace-mirror). Jansson 2009, Japan J. Indust. Appl. Math. 26:337-363, Thm 4.2
+(UB-B residual form). Rump, BIT 2006, Cor 2.4 (shifted Cholesky proves PD). VSDP
+2020 `@vsdp/rigorous_upper_bound.m`.
 
 ### 5.6 Status classification from Layer-1 output
 

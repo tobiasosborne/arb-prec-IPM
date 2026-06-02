@@ -46,6 +46,8 @@
 #include <flint/arb.h>
 #include <flint/arb_mat.h>
 
+#include "arbsdp/problem.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -93,6 +95,100 @@ void arbsdp_gershgorin_lower_bound(arb_t out, const arb_mat_t A, slong prec);
  * A is square (asserted); `d` must be initialized.  prec is the working precision.
  */
 void arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec);
+
+/* ==========================================================================
+ * Layer-1 dual residual + a-priori bounds (bead arb-prec-IPM-b18)
+ * ==========================================================================
+ * These feed the Jansson-Chaykin-Keil 2007 lower/upper bound assembled in b19.
+ * The lower bound needs (a) the dual residual Z^b = C^b - sum_i y_i A_i^b, whose
+ * lambda_min lower bound (arbsdp_lambda_min_lower_bound above) supplies the
+ * d_b <= lambda_min(Z^b) penalty term, and (b) the a-priori trace bounds
+ * xbar_b >= tr(X*_b) (CLAUDE.md invariant 5: REQUIRED for a finite lb).
+ */
+
+/*
+ * arbsdp_dual_residual -- per-block dual residual in BALL arithmetic (RIGOR):
+ *
+ *     Z[b] = C[b] - sum_{i=1}^{m} y[i-1] * A_i[b]      (b = 0 .. p->nblocks-1)
+ *
+ * where C[b] = the problem's objective matrix (matno 0, materialized verbatim via
+ * arbsdp_problem_block_mat -- NOT the solver's sign-flipped C_int = -C_file; see
+ * the SIGN note below) and A_i[b] = constraint matrix matno i for the same block.
+ *
+ * RIGOR (CLAUDE.md rule 2): the returned Z[b] is a true ball ENCLOSURE -- every
+ * entry's ball provably contains the exact C[b] - sum_i y_i A_i[b].  The linear
+ * combination is accumulated per entry with arb_dot (ONE rounding for the whole
+ * length-m dot product), so the radius rigorously absorbs all rounding error.
+ * Each Z[b] is symmetrized (arbsdp_symmetrize) because the downstream verified
+ * Cholesky / lambda_min routines read only the lower triangle.
+ *
+ * SIGN (CLAUDE.md skepticism, rule 8; REPORTED to b19, which owns the sign
+ * decision): this routine is SIGN-AGNOSTIC.  It forms Z literally from C (matno 0,
+ * file sign) and the A_i (matno 1..m, file sign, exactly as arbsdp_apply_At does).
+ * It does NOT choose or purify the sign of y -- the CALLER supplies y already in
+ * the convention that makes Z = C - sum y_i A_i the intended dual slack.  (The
+ * Layer-0 solver works in min -<C,X> with C_int = -C_file and forms sum_i y_i A_i
+ * via apply_At; mapping its y to the y this routine expects is the caller's job.)
+ *
+ * `Z` is an array of p->nblocks PRE-INITIALIZED arb_mat (caller owns init/clear),
+ * each of side |p->block_sizes[b]|.  `y` is an arb vector of length p->m (the
+ * approximate dual lifted to balls).  prec is the certification precision (the
+ * caller passes prec_c = prec + 128; MATH_SPEC §10, decision 2).  All arguments
+ * non-NULL and dimensions asserted (CLAUDE.md rule 5).
+ */
+void arbsdp_dual_residual(arb_mat_t *Z, const arbsdp_problem *p, arb_srcptr y,
+                          slong prec);
+
+/*
+ * arbsdp_apriori -- a-priori bounds the certifier needs but cannot derive from
+ * the problem data alone (CLAUDE.md invariant 5: NO silent boundedness).
+ *
+ *   xbar[b]  -- an a-priori TRACE bound  xbar[b] >= tr(X*_b)  on the b-th block of
+ *               an optimal primal X*.  Convention: a TRACE bound (sum of the
+ *               block's diagonal), with NO block-dimension factor (MATH_SPEC
+ *               §5.3.1, bead arb-prec-IPM-om9).  REQUIRED for a finite Jansson
+ *               lower bound: an UNSET xbar[b] means tr(X_b) is NOT a-priori
+ *               bounded, so b19 reports lb = -inf for that block honestly --
+ *               it NEVER silently assumes boundedness.
+ *   ybar     -- an a-priori bound on the dual (norm).  RE-SCOPED (b18 derivation,
+ *               MATH_SPEC §5.5): the FINITE upper bound (UB-A) is the dual-side
+ *               MIRROR of the lower bound and uses xbar, NOT ybar.  ybar is the
+ *               input for the SECONDARY residual upper bound (UB-B, Jansson 2009
+ *               Thm 4.2), which needs a primal-PSD projection arbsdp does not yet
+ *               have -- so ybar is currently unused by b19.  Tracked for UB-B.
+ *
+ * The set/unset distinction is carried by the *_set FLAGS, not by a sentinel
+ * value (CLAUDE.md invariant 5 + rule 8): the flag is the single source of truth
+ * for "is this bound supplied", so an explicitly-set huge xbar[b] is still a
+ * FINITE bound, distinct from "unset" (= +inf).  This struct only STORES the
+ * bounds + flags; b19 consumes them.
+ *
+ * Memory discipline (CLAUDE.md rule 7): arbsdp_apriori_init allocates the arrays
+ * and the arb_t ybar; arbsdp_apriori_clear frees them.  The setters copy `value`
+ * (arb_set), so the caller retains ownership of its own arb_t.
+ */
+typedef struct {
+    int      nblocks;
+    arb_ptr  xbar;       /* length nblocks: a-priori bound xbar[b] >= tr(X*_b)    */
+    int     *xbar_set;   /* length nblocks: 1 iff a finite xbar[b] was supplied   */
+    arb_t    ybar;       /* dual-norm bound; UB-B fallback only (NOT UB-A); see hdr */
+    int      ybar_set;   /* 1 iff ybar was supplied                              */
+} arbsdp_apriori;
+
+/* arbsdp_apriori_init -- allocate for nblocks blocks; all bounds start UNSET
+ * (xbar_set[b] = 0 for all b, ybar_set = 0).  nblocks >= 0 (asserted). */
+void arbsdp_apriori_init(arbsdp_apriori *ab, int nblocks);
+
+/* arbsdp_apriori_clear -- free all heap owned by the struct and re-zero it.
+ * Idempotent on an init'd struct (CLAUDE.md rule 7). */
+void arbsdp_apriori_clear(arbsdp_apriori *ab);
+
+/* arbsdp_apriori_set_xbar -- set xbar[b] = value and xbar_set[b] = 1 (copies
+ * value).  b in 0..nblocks-1 (asserted). */
+void arbsdp_apriori_set_xbar(arbsdp_apriori *ab, int b, const arb_t value);
+
+/* arbsdp_apriori_set_ybar -- set ybar = value and ybar_set = 1 (copies value). */
+void arbsdp_apriori_set_ybar(arbsdp_apriori *ab, const arb_t value);
 
 #ifdef __cplusplus
 }
