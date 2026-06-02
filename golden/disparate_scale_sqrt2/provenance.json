@@ -1,0 +1,25 @@
+{
+  "name": "disparate_scale_sqrt2",
+  "source": "wolframscript",
+  "description": "2x2 SDP: max x_12 s.t. x_11=2e8, x_22=1e-8, X 2x2 PSD. PSD => x_12^2 <= x_11*x_22 = 2, so opt = sqrt(P*Q) = sqrt(2) (irrational, rank-1 boundary X*). Stresses the central-path Schur complement: NT scaling W ~ diag(P,Q), M = diag(w1^2,w2^2), cond(M) ~ (P/Q)^2 ~ 4e32 >> 1e10. Also a disparate-magnitude RHS (P/Q = 2e16).",
+  "m": 2,
+  "block_sizes": [2],
+  "maximize": true,
+  "optimal_value": "1.4142135623730950488016887242096980785696718753769480731766797379",
+  "optimal_value_digits": 65,
+  "reference_method": "Closed form: Schur complement x_11*x_22 - x_12^2 >= 0 gives opt = sqrt(P*Q) = sqrt(2) with P=2e8, Q=1e-8. Cross-checked in mpmath 1.3.0 and sympy 1.14.0.",
+  "generated_by": "arbsdp golden-master generator epic.3 / wolframscript",
+  "expected_status": "optimal",
+  "target_digits": 13,
+  "prec_cap": 2048,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 8,
+  "expected_max_iters": 100,
+  "known_gaps": [
+    {
+      "kind": "efficiency",
+      "bead": "arb-prec-IPM-epic.6",
+      "reason": "measured bits/digit = final_prec/matched_digits = 2048/13.37 = 153 >> goal 8 (final_prec 2048, matched 13.37 digits vs 65-digit golden at PREC=8192, 20 iters); NUM trajectory 128:NUM:-1.9 256:NUM:4.2 512:NUM:7.5 1024:NUM:10.7 2048:OPT. Layer-0 radius/precision overrun, bead epic.6."
+    }
+  ]
+}

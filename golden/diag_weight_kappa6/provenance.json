@@ -1,0 +1,25 @@
+{
+  "name": "diag_weight_kappa6",
+  "source": "wolframscript",
+  "description": "3x3 SDP: max <diag(1,1e-3,1e-6),X> s.t. tr(X)=1, X 3x3 PSD. opt = max weight = 1 (exact, rank-1 boundary X*=e1 e1^T). Data-matrix condition number cond(C) = max/min weight = 1e6. Conditioning-ladder sibling (1e6 rung).",
+  "m": 1,
+  "block_sizes": [3],
+  "maximize": true,
+  "optimal_value": "1.0000000000000000000000000000000000000000000000000000000000000000",
+  "optimal_value_digits": 65,
+  "reference_method": "Closed form: opt = lambda_max(diag(w)) = max_i w_i = 1 (exact). Trivially verified in mpmath/sympy: max(weights)=1.",
+  "generated_by": "arbsdp golden-master generator epic.3 / wolframscript",
+  "expected_status": "optimal",
+  "target_digits": 13,
+  "prec_cap": 256,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 8,
+  "expected_max_iters": 100,
+  "known_gaps": [
+    {
+      "kind": "efficiency",
+      "bead": "arb-prec-IPM-epic.6",
+      "reason": "measured bits/digit = final_prec/matched_digits = 256/13.94 = 18 >> goal 8 (final_prec 256, matched 13.94 digits vs 65-digit golden at PREC=8192, 5 iters); NUM trajectory 128:NUM:7.8 256:OPT. Layer-0 radius/precision overrun, bead epic.6."
+    }
+  ]
+}

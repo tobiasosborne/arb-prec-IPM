@@ -28,14 +28,23 @@ static const char *st_name(arbsdp_solve_status s){
 }
 
 int main(int argc, char **argv){
-    const char *names[] = {"trivial_2x2","max_eigenvalue_2x2","sdp_sqrt2","lp_diagonal_block",
-                           "ill_conditioned_3x3","mixed_blocks","max_eig_tridiag_3x3"};
+    const char *names[] = {
+        /* baseline 7 (bead b09) */
+        "trivial_2x2", "max_eigenvalue_2x2", "sdp_sqrt2", "lp_diagonal_block",
+        "ill_conditioned_3x3", "mixed_blocks", "max_eig_tridiag_3x3",
+        /* epic.3 stress family (9 problems) */
+        "diag_weight_kappa6", "diag_weight_kappa10", "diag_weight_kappa12",
+        "disparate_scale_sqrt2",
+        "max_eig_path_4", "max_eig_path_8", "max_eig_path_16",
+        "separable_12block",
+        "two_block_corr_coupled"
+    };
     setvbuf(stdout, NULL, _IONBF, 0);
     int target = (argc>1)? atoi(argv[1]) : 15;
     slong prec_max = (argc>2)? atol(argv[2]) : 8192;
     printf("target_digits=%d prec_max=%ld\n", target, (long)prec_max);
-    printf("%-20s %-6s %8s %7s %8s %9s  trajectory(prec:status:digits)\n",
-           "problem","status","finalp","solves","iters","wall_ms");
+    printf("%-20s %-6s %8s %7s %14s %9s  trajectory(prec:status:digits)\n",
+           "problem","status","finalp","solves","iters(final)","wall_ms");
     for (unsigned k=0;k<sizeof(names)/sizeof(names[0]);k++){
         char path[512];
         snprintf(path,sizeof path,"golden/%s/%s.dat-s",names[k],names[k]);
@@ -48,8 +57,10 @@ int main(int argc, char **argv){
         arbsdp_solve_adaptive(&r,&p,&pp);
         clock_gettime(CLOCK_MONOTONIC,&t1);
         double ms=(t1.tv_sec-t0.tv_sec)*1e3+(t1.tv_nsec-t0.tv_nsec)/1e6;
-        int sumit=0; for(int i=0;i<r.prec_history_len;i++) sumit+=r.res.iters; /* approx */
-        printf("%-20s %-6s %8ld %7d %8d %9.1f  ",
+        /* bead d5w: prec_history entries carry no per-step iter count; report only the
+         * final solve's r.res.iters (iterations at the winning precision). The old code
+         * multiplied r.res.iters by prec_history_len, which was always wrong. */
+        printf("%-20s %-6s %8ld %7d %14d %9.1f  ",
                names[k], r.status==ARBSDP_ADAPTIVE_OPTIMAL?"AOPT":"ALIM",
                (long)r.final_prec, r.prec_history_len, r.res.iters, ms);
         for(int i=0;i<r.prec_history_len;i++)
@@ -58,7 +69,6 @@ int main(int argc, char **argv){
         /* recovered value */
         char *vs=arb_get_str(r.res.value, 32, 0);
         printf("    recovered = %s\n", vs); flint_free(vs);
-        (void)sumit;
         arbsdp_adaptive_result_clear(&r);
         arbsdp_problem_clear(&p);
     }

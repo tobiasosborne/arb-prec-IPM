@@ -1,0 +1,25 @@
+{
+  "name": "max_eig_path_8",
+  "source": "wolframscript",
+  "description": "8x8 SDP: max <C,X> s.t. tr(X)=1, X 8x8 PSD, C = tridiagonal Toeplitz T_8(2,1) (diagonal 2, off-diagonal 1). By the variational formula opt = lambda_max(C) = 2 + 2 cos(pi/9). Optimal X* is the rank-1 projector onto the top eigenvector (singular, boundary optimum). Scalable size-stress family (n=4,8,16).",
+  "m": 1,
+  "block_sizes": [8],
+  "maximize": true,
+  "optimal_value": "3.8793852415718167681082185546494629398724162685289292661805733255",
+  "optimal_value_digits": 65,
+  "reference_method": "Closed form lambda_max(T_n(2,1)) = 2 + 2 cos(pi/(n+1)); n=8. Cross-checked in mpmath 1.3.0 and sympy 1.14.0 against an explicit symmetric eigensolve to >60 digits.",
+  "generated_by": "arbsdp golden-master generator epic.3 / wolframscript",
+  "expected_status": "optimal",
+  "target_digits": 13,
+  "prec_cap": 1024,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 8,
+  "expected_max_iters": 100,
+  "known_gaps": [
+    {
+      "kind": "efficiency",
+      "bead": "arb-prec-IPM-epic.6",
+      "reason": "measured bits/digit = final_prec/matched_digits = 1024/15.08 = 68 >> goal 8 (final_prec 1024, matched 15.08 digits vs 65-digit golden at PREC=8192, 6 iters); NUM trajectory 128:NUM:-2.1 256:NUM:4.7 512:NUM:8.7 1024:OPT. Layer-0 radius/precision overrun, bead epic.6."
+    }
+  ]
+}
