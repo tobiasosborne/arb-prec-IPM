@@ -607,6 +607,63 @@ point when Z is far from PSD.
 If Z is verified PD (all lambda_min bounds > 0), there is no contribution from
 this block to the lower bound correction.
 
+### 5.3.1 Audition: verified lambda_min lower bound (CLAUDE.md rule 3; bead b27)
+
+The certified `d_b <= lambda_min(Z^b)` is the single rigor source for the Jansson
+lower bound (§5.4).  Candidates auditioned for the arb / FLINT 3.0.1 BALL setting
+(small dense Z, high prec, Z typically near-singular at the SDP boundary):
+
+| technique | rigor | tightness | cost (dense n) | verdict |
+|-----------|-------|-----------|----------------|---------|
+| Verified-Cholesky shift (`arb_mat_cho(Z - s*I)`, bisect s) | rigorous: a 1-return is a PD theorem (FLINT contract; Rump 2006 Cor 2.4) | -> lambda_min within bisection tol (~2^(-prec/2)*scale) | O(n^3 M(prec)) per shift, ~prec/2 shifts | **CHOSEN** |
+| Rigorous symmetric eig (`acb_mat_eig`) | weak: eigenvector balls blow up ~1/eigengap at degeneracy | vacuous near boundary | O(n^3 M(prec)) + complex round-trip | rejected: arb's weak axis; `acb_mat_approx_eig_qr` returned ok=0 even on a diagonal matrix in `eig_audition.c` |
+| Weyl / Rump perturbation (`verify_eigsym`, VSDP's choice) | rigorous BUT needs an approximate eig for the V*D*V' residual | vacuous near degeneracy | O(n^3) eig + interval matmul (~10-30x a Cholesky) | rejected for arb: VSDP runs it at double prec where V is cheap; in arb the eig dependency + matmul dominate, and Cholesky-shift already handles negative lambda_min |
+| Single-shot Gershgorin | rigorous, always valid | loose for non-diagonally-dominant Z | O(n^2) | kept as the bisection SEED only, not the returned bound |
+| Newton/secant on the shift | n/a | n/a | n/a | rejected: d(lambda_min)/ds = -1 makes Newton degenerate; Higham-Strabic-Sego 2016 ship pure bisection |
+
+**Decision.** Verified-Cholesky shift with a Gershgorin seed and bisection on the
+monotone predicate `g(s) = "arb_mat_cho(Z - s*I) succeeds"`.  Rationale: (1) it uses
+Arb's strongest axis (ball linear algebra) and satisfies CLAUDE invariant 2; (2) a
+successful ball Cholesky IS the proof -- no separate error analysis (Rump 2006: a
+completed factorization of the shifted matrix certifies PD); (3) it handles negative
+and ~0 lambda_min uniformly (bisect the shift through 0), so Weyl's only advantage
+over Cholesky-shift evaporates while its eig dependency and matmul cost remain;
+(4) the eig route is unavailable (no real-symmetric arb eigensolver) and untrustworthy
+at arb precision (`eig_audition.c`).  The returned `d` satisfies `d <= lambda_min(Z^b)`
+as a theorem; `d` may be `<= 0` for indefinite / rank-deficient Z (the boundary case),
+which is exactly what the `min(0, d_b)` penalty in §5.4 consumes.
+
+**Search parameters (binding).** Seed `s_lo` = Gershgorin lower bound
+`min_i( lbound(Z_ii) - sum_{j!=i} ubound(|Z_ij|) )`; maintain the bracket invariant
+`[s_lo: chol passes, s_hi: chol fails]`; bisect to `tol = 2^(-prec/2) * max(1, ||Z||_Gershgorin)`;
+`ITER_CAP = 60`; on a chol failure near the boundary, retry once at `prec*3/2` before
+trusting the failure (precision-starvation guard).  The shift is subtracted at its
+UPPER endpoint so a success proves the bound for the true (point) shift.  Z is
+`arbsdp_symmetrize`d first (arb_mat_cho reads only the lower triangle).
+
+**A-priori-bound convention (no block-dimension factor in our trace form).**  Our
+§5.4 uses `x_bar_b >= tr(X_b)` (a TRACE bound).  For symmetric D and `X >= 0`,
+`tr(DX) >= lambda_min(D) * tr(X)`; when `lambda_min(D) < 0` and `tr(X) <= x_bar`,
+this gives `tr(DX) >= min(0, lambda_min(D)) * x_bar` -- with NO dimension factor.
+Jansson-Chaykin-Keil 2007 (Thm 3.2 / Lemma 3.1) carry a block-dimension factor
+`s_b` because their a-priori bound is a Loewner / eigenvalue bound `X <= x_bar*I`
+(for which `tr(X) <= s_b*x_bar`); the two forms are equivalent under
+`x_bar_trace = s_b * x_bar_Loewner`.  **BINDING for b18/b19:** the a-priori-bound
+API and every golden MUST supply `x_bar_b` as a TRACE bound -- supplying a Loewner /
+lambda_max bound without the `s_b` factor would over-state lb and could EXCLUDE the
+optimum (P0, CLAUDE rule 2).  Tracked + to be re-verified against JCK 2007 directly
+during the b18 assembly: bead arb-prec-IPM-om9.
+
+**Scope.** b17 implements only `arbsdp_verified_psd`, `arbsdp_gershgorin_lower_bound`,
+and `arbsdp_lambda_min_lower_bound` (returns `d_b`).  The lb/ub ASSEMBLY and the
+upper-bound `y_bar` derivation (§5.5) are b18/b19.
+
+**References.** Jansson-Chaykin-Keil 2007, SIAM J. Numer. Anal. 46(1):180-200
+(Thm 3.2, Lemma 3.1).  Rump, BIT 2006, 46:433-452 (Thm 2.3 / Cor 2.4: shifted
+Cholesky proves PD, incl. interval matrices).  Higham-Strabic-Sego, SIAM Review
+2016, 58(2):245-263 (bisection definiteness oracle).  Gershgorin 1931.  FLINT 3.0.1
+`arb_mat.h:378` (`arb_mat_cho` returns 1 = certainly PD over input balls).
+
 ### 5.4 A-priori trace bound (required for finite lower bound)
 
 **CLAUDE.md invariant 5 (non-negotiable):** A finite lower bound requires a
