@@ -955,6 +955,192 @@ test_tight_lb_primal(const golden_case *cases, int n)
     }
 }
 
+/* -------------------------------------------------------------------------
+ * separable_12block_opt -- fill `out` with the EXACT closed-form true optimum
+ * of separable_12block, as a tight ball at precision `prec` (~2^-prec radius).
+ *
+ * Problem (golden/separable_12block.dat-s): m = nblocks = 12, each block c
+ * (c=1..12) is a 2x2 PSD block with objective C_c = [[c,1],[1,0]] and a single
+ * trace constraint A_c = I_2 on block c with b_c = 1 (and zero on every other
+ * block).  It is FULLY SEPARABLE: opt = sum_c (b_c * lambda_max(C_c)).  For the
+ * 2x2 [[c,1],[1,0]] the eigenvalues are (c +/- sqrt(c^2+4))/2, so
+ *     lambda_max(C_c) = c/2 + sqrt(c^2/4 + 1),
+ *     opt = sum_{c=1}^{12} ( c/2 + sqrt(c^2/4 + 1) )  ~= 80.5708360166...
+ * Computed here as a tight ball -> the tightness gate compares against the TRUE
+ * optimum, not a 65-digit rounded reference (bead vry FINDING; CLAUDE rule 2/8).
+ * ---------------------------------------------------------------------- */
+static void
+separable_12block_opt(arb_t out, slong prec)
+{
+    arb_t term, t;
+    arb_init(term);
+    arb_init(t);
+    arb_zero(out);
+    for (int c = 1; c <= 12; c++) {
+        /* term = c/2 + sqrt(c^2/4 + 1) = ( c + sqrt(c^2 + 4) ) / 2. */
+        arb_set_si(t, (slong) c * c + 4);   /* c^2 + 4         */
+        arb_sqrt(t, t, prec);               /* sqrt(c^2 + 4)   */
+        arb_add_si(term, t, c, prec);       /* c + sqrt(c^2+4) */
+        arb_mul_2exp_si(term, term, -1);    /* / 2             */
+        arb_add(out, out, term, prec);
+    }
+    arb_clear(term);
+    arb_clear(t);
+}
+
+/* ==========================================================================
+ * Step 11: TIGHT LOWER BOUND on the FULLY-SEPARABLE per-block-trace problem
+ * (bead arb-prec-IPM-oc7 part (a)).
+ *
+ * separable_12block is the multi-block generalization of the vry single-block
+ * max-eigenvalue family: m == nblocks == 12, each constraint A_c = I_2 on block c
+ * and zero elsewhere (b_c = 1), objective separable across blocks.  A FEASIBLE
+ * primal point is the block direct-sum of rank-1 trace-b_c points
+ *     X_hat = (+)_c  b_c * v_c v_c^T / (v_c^T v_c),
+ * PSD by construction (rank-1 PSD blocks, b_c >= 0) and feasible (A_c(X_hat) =
+ * tr(X_hat_c) = b_c, no cross-block coupling), so
+ *     lb = sum_c b_c * R(v_c) <= sum_c b_c * lambda_max(C_c) = opt
+ * is rigorous in ball arithmetic for ANY fixed v_c (Courant-Fischer; the primal
+ * mirror of the dual Jansson bound).  Before oc7 the certifier had only the
+ * single-block detector, so it fell back to the loose dual lb (lb ~= -2.57,
+ * gap_lo ~= 83.1).  oc7 generalizes arbsdp_primal_lower_bound to the per-block
+ * case, so the lb is now TIGHT.
+ *
+ * GATE (CLAUDE.md rule 2/8): opt - lb < 1e-40 (TIGHTNESS), and lb <= TRUE opt
+ * (RIGOR) -- compared against a tight closed-form ball (separable_12block_opt at
+ * CMP_PREC bits) so a now-tight lb that lands past any rounded reference does NOT
+ * false-fail.  DO NOT loosen the threshold; a gap >= 1e-40 is a P0 finding (the
+ * per-block primal bound is not being applied) -- STOP and report (per the bead).
+ * ======================================================================== */
+static void
+test_separable_primal_tight(const golden_case *cases, int n)
+{
+    const golden_case *c = find_case(cases, n, "separable_12block");
+    CHECK(c != NULL, "separable_tight: separable_12block discovered");
+    if (c == NULL)
+        return;
+
+    arbsdp_problem p;
+    arbsdp_adaptive_result r;
+    slong prec_c = solve_to_iterate(&p, &r, c);
+
+    CHECK(p.nblocks == 12 && p.m == 12,
+          "separable_tight: m == nblocks == 12 (fully separable shape)");
+
+    /* xbar = 1 per block: tr(X_c) = 1 (A_c = I_2 on block c, b_c = 1). */
+    arbsdp_apriori ab;
+    arbsdp_apriori_init(&ab, p.nblocks);
+    {
+        arb_t one; arb_init(one); arb_one(one);
+        for (int b = 0; b < p.nblocks; b++)
+            arbsdp_apriori_set_xbar(&ab, b, one);
+        arb_clear(one);
+    }
+
+    arb_t lb, ub, opt, gap, tol;
+    arb_init(lb); arb_init(ub); arb_init(opt); arb_init(gap); arb_init(tol);
+
+    /* opt: the TRUE optimum as a tight closed-form ball (~2^-4096 radius). */
+    separable_12block_opt(opt, CMP_PREC);
+
+    arbsdp_certify_status st =
+        arbsdp_certify_bracket(lb, ub, &p, &r.res.it, &ab, prec_c);
+
+    CHECK(st == ARBSDP_CERTIFY_OPTIMAL_BRACKET,
+          "separable_tight: status OPTIMAL_BRACKET");
+
+    /* RIGOR (falsifiable against the TRUE closed-form optimum): lb is sound unless
+     * it exceeds the UPPER endpoint of the opt ball.  lb is an exact point. */
+    CHECK(arb_le(lb, opt),
+          "separable_tight: lb <= TRUE closed-form opt (sum_c c/2+sqrt(c^2/4+1))");
+    CHECK(arb_le(opt, ub),
+          "separable_tight: opt <= ub (dual upper bound contains opt)");
+
+    /* TIGHTNESS (the oc7 deliverable): opt - lb < 1e-40.  Measure from the UPPER
+     * endpoint of the opt ball minus the LOWER endpoint of lb -- a CONSERVATIVE
+     * over-estimate of the true gap.  Before oc7: lb ~= -2.57, gap ~= 83 (FAILS). */
+    {
+        arf_t opt_hi, lb_lo;
+        arf_init(opt_hi); arf_init(lb_lo);
+        arb_get_ubound_arf(opt_hi, opt, CMP_PREC);
+        arb_get_lbound_arf(lb_lo, lb, CMP_PREC);
+        arf_sub(arb_midref(gap), opt_hi, lb_lo, CMP_PREC, ARF_RND_CEIL);
+        mag_zero(arb_radref(gap));
+        arf_clear(opt_hi); arf_clear(lb_lo);
+    }
+    arb_set_str(tol, "1e-40", CMP_PREC);
+    CHECK(arb_lt(gap, tol),
+          "separable_tight: opt-lb < 1e-40 (per-block primal Rayleigh, oc7)");
+
+    /* Concrete diagnostics (CLAUDE.md rule 11). */
+    {
+        char *slb  = arb_get_str(lb,  30, ARB_STR_NO_RADIUS);
+        char *sub  = arb_get_str(ub,  30, ARB_STR_NO_RADIUS);
+        char *sopt = arb_get_str(opt, 30, ARB_STR_NO_RADIUS);
+        char *sgap = arb_get_str(gap, 12, ARB_STR_NO_RADIUS);
+        fprintf(stderr,
+                "\nSEPARABLE-TIGHT (oc7): separable_12block prec_c=%ld\n"
+                "  lb =%s\n  ub =%s\n  opt=%s\n  opt-lb=%s  (gate: < 1e-40)\n",
+                (long) prec_c, slb, sub, sopt, sgap);
+        flint_free(slb); flint_free(sub); flint_free(sopt); flint_free(sgap);
+    }
+
+    arb_clear(lb); arb_clear(ub); arb_clear(opt); arb_clear(gap); arb_clear(tol);
+    arbsdp_apriori_clear(&ab);
+    arbsdp_adaptive_result_clear(&r);
+    arbsdp_problem_clear(&p);
+}
+
+/* ==========================================================================
+ * Step 12: DETECTOR REJECTS coupled / non-separable problems (bead oc7).
+ *
+ * arbsdp_primal_lower_bound must REJECT (return 0, lb untouched) any problem that
+ * is NOT fully-separable-per-block-trace, so the caller keeps the (still rigorous)
+ * dual lb.  We assert two rejections directly:
+ *   two_block_corr_coupled -- m=5 != nblocks=2 (constraint 5 couples both blocks),
+ *   sdp_sqrt2              -- single block but m>1 (m != nblocks).
+ * A reject means primal_lower_bound returns 0; lb_out is left untouched (we
+ * pre-set it to a sentinel and check it is unchanged).
+ * ======================================================================== */
+static void
+test_detector_rejects_coupled(const golden_case *cases, int n)
+{
+    static const char *names[] = { "two_block_corr_coupled", "sdp_sqrt2" };
+    int nn = (int) (sizeof names / sizeof names[0]);
+
+    for (int k = 0; k < nn; k++) {
+        const golden_case *c = find_case(cases, n, names[k]);
+        CHECK(c != NULL, "detector_reject: golden discovered");
+        if (c == NULL)
+            continue;
+
+        arbsdp_problem p;
+        arbsdp_adaptive_result r;
+        slong prec_c = solve_to_iterate(&p, &r, c);
+
+        arb_t lb_primal;
+        arb_init(lb_primal);
+        arb_set_str(lb_primal, "-12345", prec_c);   /* sentinel: must stay untouched */
+
+        int applied = arbsdp_primal_lower_bound(lb_primal, &p, &r.res.it, prec_c);
+
+        CHECK(applied == 0, "detector_reject: NOT applicable (returns 0)");
+        {
+            arb_t sentinel; arb_init(sentinel);
+            arb_set_str(sentinel, "-12345", prec_c);
+            CHECK(arb_equal(lb_primal, sentinel),
+                  "detector_reject: lb_out untouched on reject");
+            arb_clear(sentinel);
+        }
+        fprintf(stderr, "DETECTOR REJECT: %-22s primal_lower_bound applied=%d (expect 0)\n",
+                names[k], applied);
+
+        arb_clear(lb_primal);
+        arbsdp_adaptive_result_clear(&r);
+        arbsdp_problem_clear(&p);
+    }
+}
+
 int main(void)
 {
     golden_case cases[MAX_CASES];
@@ -971,6 +1157,8 @@ int main(void)
     test_sign_selftest(cases, n);
     test_trace_vs_loewner();
     test_tight_lb_primal(cases, n);
+    test_separable_primal_tight(cases, n);
+    test_detector_rejects_coupled(cases, n);
 
     if (failures == 0) {
         printf("\ntest_certify_bracket: ALL PASS\n");

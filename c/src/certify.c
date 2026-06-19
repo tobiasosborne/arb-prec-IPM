@@ -754,146 +754,281 @@ arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
 }
 
 /* ---------------------------------------------------------------------------
- * arbsdp_primal_lower_bound -- rigorous PRIMAL (Rayleigh) lower bound from a
- * FEASIBLE rank-1 primal point X_hat = b_1 * v v^T / (v^T v) (bead arb-prec-IPM-vry).
+ * block_rayleigh_lb -- the per-block rigorous Rayleigh lower bound
+ *     lb_b = beta_b * R(v_b),   R(v_b) = (v_b^T C_b v_b)/(v_b^T v_b)
+ * where v_b is the midpoint of the top (largest-eigenvalue) eigenvector of the
+ * solver's primal block X_b.  This is exactly the proven vry inner computation,
+ * parameterized over (C_b, beta_b, X_b).  Returns 1 and sets lb_b on success; 0
+ * (lb_b untouched) iff the den = v_b^T v_b lower-endpoint guard trips (rule 5).
  *
  * Parlett 1998 ("The Symmetric Eigenvalue Problem", Rayleigh quotient / Courant-
- * Fischer): R(v) = (v^T C v)/(v^T v) <= lambda_max(C) for ANY v != 0.  For the
- * single-block single-trace external problem max <C,X> s.t. tr(X)=b_1, X>=0 (opt =
- * b_1 lambda_max(C)), X_hat above is EXACTLY feasible (rank-1 => PSD by
- * construction; tr(X_hat)=b_1), so <C,X_hat> = b_1 R(v) is a lower bound on opt.
- *
- * RIGOR (CLAUDE.md rule 2): the quotient is computed in BALL arithmetic, so lb_out
- * is a true enclosure and its lower endpoint <= opt for the FIXED exact vector v.
- * No eig rigor, no PSD certification of X (primal mirror of the dual bound; works
- * at the PSD boundary, invariant 1).  v is the POINT-MODE top eigenvector of the
- * solver's primal block, FROZEN to an exact midpoint vector -- a direction only,
- * never a rigor dependency (a poor v merely loosens lb).
+ * Fischer): R(v) <= lambda_max(C_b) for ANY v != 0.  RIGOR (rule 2): the quotient
+ * is computed in BALL arithmetic, so lb_b is a true enclosure and its lower
+ * endpoint <= beta_b*lambda_max(C_b) for the FIXED exact v_b (assuming beta_b>=0,
+ * which the caller's detector guarantees).  No eig rigor, no PSD certification of
+ * X (the rank-1 block is PSD by construction; invariant 1).  v_b is the POINT-MODE
+ * top eigenvector FROZEN to an exact midpoint vector -- a direction only, never a
+ * rigor dependency (a poor v_b merely loosens lb_b).
  *
  * Memory (rule 7): every init/_arb_vec_init/arb_mat_init has a matching clear.
+ * ------------------------------------------------------------------------- */
+static int
+block_rayleigh_lb(arb_t lb_b, const arb_mat_t C_b, const arb_t beta_b,
+                  const arb_mat_t X_b, slong prec)
+{
+    slong     n = arb_mat_nrows(C_b);
+    arb_mat_t Q;        /* eigenvectors (POINT MODE); top vector = last col      */
+    arb_ptr   eigvals;  /* length n (ASCENDING; unused except via the col)       */
+    arb_ptr   v;        /* exact (zero-radius) top eigenvector                   */
+    arb_ptr   Cv;       /* C_b v (ball)                                          */
+    arb_t     num;      /* v^T C_b v (ball)                                      */
+    arb_t     den;      /* v^T v     (ball)                                      */
+    arb_t     ray;      /* num / den                                            */
+    arf_t     den_lo;   /* lower endpoint of den (divisibility guard)            */
+    int       ok = 1;   /* set 0 if the den guard trips                          */
+
+    assert(arb_mat_ncols(C_b) == n && arb_mat_nrows(X_b) == n
+           && arb_mat_ncols(X_b) == n && "block_rayleigh_lb: square, matched");
+
+    arb_mat_init(Q, n, n);
+    eigvals = _arb_vec_init(n);
+    v  = _arb_vec_init(n);
+    Cv = _arb_vec_init(n);
+    arb_init(num);
+    arb_init(den);
+    arb_init(ray);
+    arf_init(den_lo);
+
+    /* POINT-MODE top eigenvector of the solver's primal block (direction only;
+     * NOT a rigor dependency).  arbsdp_eigh: eigenvalues ASCENDING, column j of Q
+     * is the unit eigenvector for eigvals[j] -> TOP vector is column n-1.  Freeze
+     * it to an EXACT (zero-radius) midpoint vector: the bound is rigorous for ANY
+     * FIXED v, and using the midpoint stops the point-mode eigenvector's radius
+     * from widening the result while staying sound. */
+    arbsdp_eigh(eigvals, Q, X_b, prec);
+    for (slong i = 0; i < n; i++)
+        arb_get_mid_arb(v + i, arb_mat_entry(Q, i, n - 1));
+
+    /* BALL arithmetic for the rigorous quotient.  Cv_i = sum_j C_b[i][j] v_j via
+     * arb_dot (one rounding per row), then num = sum_i v_i (Cv)_i and den =
+     * sum_i v_i^2, each one arb_dot (tightest rigorous enclosure). */
+    for (slong i = 0; i < n; i++) {
+        arb_dot(Cv + i, NULL, 0,
+                C_b->rows[i], 1,   /* row i of C_b: entries C_b[i][0..n-1]       */
+                v, 1, n, prec);
+    }
+    arb_dot(num, NULL, 0, v, 1, Cv, 1, n, prec);   /* num = v^T C_b v            */
+    arb_dot(den, NULL, 0, v, 1, v,  1, n, prec);   /* den = v^T v                */
+
+    /* GUARD (rule 5): a rigorous divide needs den strictly positive.  If the LOWER
+     * endpoint of den is <= 0 the quotient is not enclosable -> 0 (caller keeps
+     * the dual bound).  For an orthonormal Q this never fires (den ~ 1). */
+    arb_get_lbound_arf(den_lo, den, prec);
+    if (arf_sgn(den_lo) <= 0) {
+        ok = 0;
+    } else {
+        arb_div(ray, num, den, prec);     /* ray = R(v) = (v^T C_b v)/(v^T v)     */
+        arb_mul(lb_b, beta_b, ray, prec); /* lb_b = beta_b * R(v) <= beta_b l_max */
+    }
+
+    arb_mat_clear(Q);
+    _arb_vec_clear(eigvals, n);
+    _arb_vec_clear(v, n);
+    _arb_vec_clear(Cv, n);
+    arb_clear(num);
+    arb_clear(den);
+    arb_clear(ray);
+    arf_clear(den_lo);
+
+    return ok;   /* 1: lb_b set; 0: den guard tripped, lb_b untouched */
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_primal_lower_bound -- rigorous PRIMAL (Rayleigh) lower bound from a
+ * FEASIBLE block-diagonal rank-1 primal point, for the FULLY-SEPARABLE
+ * per-block-trace family (bead arb-prec-IPM-oc7; generalizes the single-block vry
+ * case to nblocks >= 1).
+ *
+ * SHAPE (the applicability detector, CONSERVATIVE -- a wrong ACCEPT is a P0, so we
+ * prefer rejecting; rule 2/8).  The construction below is valid IFF m == nblocks
+ * and there is a BIJECTION constraint i <-> block b_i where constraint A_i is
+ * EXACTLY the identity I on block b_i and EXACTLY zero on every other block (each
+ * block has exactly one constraint pinning its trace, tr(X_{b_i}) = beta_b_i, and
+ * no constraint couples two blocks), with beta_b_i = b_{i-1} >= 0.  Then the
+ * block direct-sum of rank-1 trace-beta points
+ *     X_hat = (+)_b  beta_b * v_b v_b^T / (v_b^T v_b)
+ * is EXACTLY feasible: PSD by construction (rank-1 PSD blocks since beta_b >= 0)
+ * and A_i(X_hat) = tr(X_hat_{b_i}) = beta_{b_i} = b_i for every i (no cross-block
+ * coupling), so by Courant-Fischer (R(v_b) <= lambda_max(C_b))
+ *     <C, X_hat> = sum_b beta_b R(v_b) <= sum_b beta_b lambda_max(C_b) = opt
+ * is a rigorous LOWER bound on the external max optimum, for ANY fixed v_b.  The
+ * single-block single-trace vry case is exactly nblocks == 1 (one block, beta_0 =
+ * b_1, A_1 = I): this routine reproduces it bit-identically.
+ *
+ * RIGOR (rule 2, invariant 2): each per-block quotient is evaluated in Arb *ball*
+ * arithmetic (block_rayleigh_lb) and the blocks are summed in ball arithmetic, so
+ * lb_out is a true enclosure with lower endpoint <= opt REGARDLESS of solve
+ * quality.  Needs NO eigenvalue rigor and NO PSD certification of X (the rank-1
+ * blocks are PSD by construction -- exactly why it works at the PSD boundary where
+ * a verified Cholesky of X FAILS; invariant 1).  The exact-identity / exact-zero
+ * ball checks (arb_is_one / arb_is_zero) accept ONLY zero-radius exact 1/0 balls
+ * (the goldens store A_i from "1.0"/"0.0" strings -> exact), so a constraint that
+ * is not LITERALLY a per-block trace is rejected and the feasibility proof holds.
+ * The beta_b >= 0 check (lower endpoint sgn >= 0) is REQUIRED: a negative beta_b
+ * makes beta_b * v v^T NOT PSD, breaking feasibility.
+ *
+ * APPLICABILITY: returns 1 and sets lb_out only when ALL the shape conditions
+ * hold; otherwise returns 0 (lb_out untouched) and the caller falls back to the
+ * rigorous dual bound (safe).  A tripped den guard in ANY block (block_rayleigh_lb
+ * returns 0) also returns 0 (the whole primal bound is unavailable; conservative).
+ *
+ * Coupled / multi-constraint-per-block / higher-rank feasible points are oc7 (b)/(c).
+ *
+ * Citation: R(v) <= lambda_max(C_b) is standard (Parlett, "The Symmetric
+ * Eigenvalue Problem", 1998, Rayleigh-quotient / Courant-Fischer min-max); this is
+ * the primal mirror of the dual-residual Jansson lower bound (arbsdp_lower_bound).
+ *
+ * Memory (rule 7): lb_out is a caller-init'd output; every per-constraint /
+ * per-block materialization temporary and the malloc'd covered[] map are scoped
+ * and freed on every return path.  p, it non-NULL.  prec is the working precision.
  * ------------------------------------------------------------------------- */
 int
 arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
                           const arbsdp_iterate *it, slong prec)
 {
-    slong n;
-    int applicable;
+    int   nb;
+    int  *covered;   /* covered[b] = constraint matno (1..m) that pins block b, 0=none */
+    int   applicable = 1;
 
     assert(lb_out != NULL && p != NULL && it != NULL
            && "primal_lower_bound: lb_out, p, it non-NULL");
 
-    /* APPLICABILITY (CONSERVATIVE, rule 2/8): only the single-block,
-     * single-trace-constraint shape supports the rank-1 trace construction. */
-    if (p->nblocks != 1 || p->m != 1 || it->nblocks != 1 || it->m != 1)
+    /* APPLICABILITY part 1 (cheap structural gate): one constraint per block. */
+    if (p->nblocks != p->m)
+        return 0;
+    if (it->nblocks != p->nblocks || it->m != p->m)
         return 0;
 
-    n = it->block_n[0];
-    /* A consistent problem has block side |block_sizes[0]| == it->block_n[0];
-     * guard the eig/dimension assumptions regardless (rule 5). */
-    if (n <= 0)
+    nb = p->nblocks;
+    if (nb <= 0)
         return 0;
 
-    /* A_1 must materialize EXACTLY to I_n: a non-exact A_1 (any diagonal entry not
-     * arb_is_one, any off-diagonal not arb_is_zero) is a DIFFERENT constraint than
-     * tr(X)=b_1, so the feasibility proof would not hold -- reject to stay rigorous.
-     * (The max-eig goldens store A_1 from "1.0" strings, so the entries are exactly
-     * 1/0; arb_set_str of "1"/"0" yields a zero-radius exact ball.) */
-    applicable = 1;
-    {
-        arb_mat_t A1;
-        arb_mat_init(A1, n, n);
-        arbsdp_problem_block_mat(A1, p, /*matno=*/1, /*block=*/0, prec);
-        for (slong i = 0; i < n && applicable; i++) {
-            for (slong j = 0; j < n; j++) {
-                arb_srcptr e = arb_mat_entry(A1, i, j);
-                if (i == j) {
-                    if (!arb_is_one(e)) { applicable = 0; break; }
-                } else {
-                    if (!arb_is_zero(e)) { applicable = 0; break; }
+    covered  = flint_calloc((size_t) nb, sizeof *covered);   /* 0 = uncovered    */
+
+    /* APPLICABILITY part 2: each constraint i (matno i, i=1..m) must be EXACTLY I
+     * on EXACTLY ONE block b_i and EXACTLY zero on every other block; the map
+     * i -> b_i must be a bijection onto {0..nblocks-1}.  Exact-ball checks
+     * (arb_is_one / arb_is_zero) accept ONLY zero-radius exact 1/0 (rule 2/8). */
+    for (int i = 1; i <= nb && applicable; i++) {
+        int found = -1;   /* the unique block on which A_i is the (nonzero) identity */
+
+        for (int b = 0; b < nb && applicable; b++) {
+            slong sz = it->block_n[b];
+            arb_mat_t A;
+            int is_identity = 1;   /* A == I_sz exactly                            */
+            int is_zero     = 1;   /* A == 0 exactly                               */
+
+            if (sz <= 0) { applicable = 0; break; }   /* guard (rule 5)            */
+
+            arb_mat_init(A, sz, sz);
+            arbsdp_problem_block_mat(A, p, /*matno=*/i, /*block=*/b, prec);
+            for (slong r = 0; r < sz; r++) {
+                for (slong cc = 0; cc < sz; cc++) {
+                    arb_srcptr e = arb_mat_entry(A, r, cc);
+                    if (!arb_is_zero(e))                 is_zero = 0;
+                    if (r == cc) { if (!arb_is_one(e))   is_identity = 0; }
+                    else         { if (!arb_is_zero(e))  is_identity = 0; }
                 }
             }
+            arb_mat_clear(A);
+
+            if (is_zero) {
+                continue;                /* A_i is zero on block b: fine            */
+            } else if (is_identity) {
+                if (found != -1) { applicable = 0; break; } /* identity on TWO blocks */
+                found = b;
+            } else {
+                applicable = 0; break;   /* nonzero but NOT exactly I -> reject     */
+            }
         }
-        arb_mat_clear(A1);
+
+        if (!applicable)
+            break;
+        if (found == -1) { applicable = 0; break; }   /* A_i is zero on ALL blocks  */
+        if (covered[found] != 0) { applicable = 0; break; } /* block pinned twice    */
+        covered[found] = i;              /* block `found` pinned by constraint i     */
     }
-    if (!applicable)
+
+    /* APPLICABILITY part 3: bijection -- every block covered exactly once.  (Each
+     * was covered at most once above; require at least once here.) */
+    for (int b = 0; b < nb && applicable; b++)
+        if (covered[b] == 0) applicable = 0;
+
+    /* APPLICABILITY part 4: beta_b = b_{i_b - 1} >= 0 for the pinning constraint
+     * i_b of each block (a negative trace makes beta_b v v^T NOT PSD -> the rank-1
+     * point is infeasible).  Reject on a NEGATIVE lower endpoint (rule 2/5). */
+    if (applicable) {
+        arb_t  beta;
+        arf_t  beta_lo;
+        arb_init(beta);
+        arf_init(beta_lo);
+        for (int b = 0; b < nb; b++) {
+            int rc = arbsdp_problem_b(beta, p, covered[b] - 1, prec); /* b is 0-indexed */
+            assert(rc == 0 && "primal_lower_bound: beta_b failed to parse");
+            (void) rc;
+            arb_get_lbound_arf(beta_lo, beta, prec);
+            if (arf_sgn(beta_lo) < 0) { applicable = 0; break; }
+        }
+        arb_clear(beta);
+        arf_clear(beta_lo);
+    }
+
+    if (!applicable) {
+        flint_free(covered);
         return 0;
+    }
 
-    /* COMPUTE the rigorous Rayleigh lower bound. */
+    /* COMPUTE: lb_out = sum_b beta_b * R(v_b), accumulated in BALL arithmetic.  Any
+     * block's den guard tripping (block_rayleigh_lb -> 0) makes the WHOLE primal
+     * bound unavailable (conservative; caller keeps the dual bound). */
     {
-        arb_mat_t C;        /* file-sign objective block (n x n ball)            */
-        arb_mat_t Q;        /* eigenvectors (POINT MODE); top vector = last col  */
-        arb_ptr   eigvals;  /* length n (ASCENDING; unused except via the col)   */
-        arb_ptr   v;        /* exact (zero-radius) top eigenvector               */
-        arb_ptr   Cv;       /* C v (ball)                                        */
-        arb_t     b1;       /* b_1 (ball)                                        */
-        arb_t     num;      /* v^T C v (ball)                                    */
-        arb_t     den;      /* v^T v   (ball)                                    */
-        arb_t     ray;      /* num / den                                        */
-        arf_t     den_lo;   /* lower endpoint of den (divisibility guard)        */
-        int       rc;
-        int       ok = 1;   /* set 0 if the den guard trips                      */
+        arb_mat_t C_b;
+        arb_t     beta_b;
+        arb_t     lb_b;
+        arb_t     acc;
+        int       ok = 1;
 
-        arb_mat_init(C, n, n);
-        arb_mat_init(Q, n, n);
-        eigvals = _arb_vec_init(n);
-        v  = _arb_vec_init(n);
-        Cv = _arb_vec_init(n);
-        arb_init(b1);
-        arb_init(num);
-        arb_init(den);
-        arb_init(ray);
-        arf_init(den_lo);
+        arb_init(beta_b);
+        arb_init(lb_b);
+        arb_init(acc);
+        arb_zero(acc);
 
-        arbsdp_problem_block_mat(C, p, /*matno=*/0, /*block=*/0, prec); /* C_file */
-        rc = arbsdp_problem_b(b1, p, 0, prec);                          /* b_1    */
-        assert(rc == 0 && "primal_lower_bound: b_1 failed to parse");
-        (void) rc;
+        for (int b = 0; b < nb && ok; b++) {
+            slong sz = it->block_n[b];
+            arb_mat_init(C_b, sz, sz);
+            arbsdp_problem_block_mat(C_b, p, /*matno=*/0, /*block=*/b, prec); /* C_file^b */
 
-        /* POINT-MODE top eigenvector of the solver's primal block (direction only;
-         * NOT a rigor dependency).  arbsdp_eigh: eigenvalues ASCENDING, column j of
-         * Q is the unit eigenvector for eigvals[j] -> TOP vector is column n-1.
-         * Freeze it to an EXACT (zero-radius) midpoint vector: the bound is
-         * rigorous for ANY FIXED v, and using the midpoint stops the point-mode
-         * eigenvector's radius from widening the result while staying sound. */
-        arbsdp_eigh(eigvals, Q, it->X[0], prec);
-        for (slong i = 0; i < n; i++)
-            arb_get_mid_arb(v + i, arb_mat_entry(Q, i, n - 1));
+            int rc = arbsdp_problem_b(beta_b, p, covered[b] - 1, prec); /* beta_b   */
+            assert(rc == 0 && "primal_lower_bound: beta_b failed to parse");
+            (void) rc;
 
-        /* BALL arithmetic for the rigorous quotient.  Cv_i = sum_j C[i][j] v_j
-         * via arb_dot (one rounding per row), then num = sum_i v_i (Cv)_i and
-         * den = sum_i v_i^2, each one arb_dot (tightest rigorous enclosure). */
-        for (slong i = 0; i < n; i++) {
-            arb_dot(Cv + i, NULL, 0,
-                    C->rows[i], 1,   /* row i of C: entries C[i][0..n-1]         */
-                    v, 1, n, prec);
-        }
-        arb_dot(num, NULL, 0, v, 1, Cv, 1, n, prec);   /* num = v^T C v          */
-        arb_dot(den, NULL, 0, v, 1, v,  1, n, prec);   /* den = v^T v            */
-
-        /* GUARD (rule 5): a rigorous divide needs den strictly positive.  If the
-         * LOWER endpoint of den is <= 0 the quotient is not enclosable -> not
-         * applicable (return 0, caller keeps the dual bound).  For an orthonormal
-         * Q this never fires (den ~ 1), but we never assume it. */
-        arb_get_lbound_arf(den_lo, den, prec);
-        if (arf_sgn(den_lo) <= 0) {
-            ok = 0;
-        } else {
-            arb_div(ray, num, den, prec);   /* ray = R(v) = (v^T C v)/(v^T v)     */
-            arb_mul(lb_out, b1, ray, prec); /* lb = b_1 * R(v) <= b_1 lambda_max  */
+            if (block_rayleigh_lb(lb_b, C_b, beta_b, it->X[b], prec)) {
+                arb_add(acc, acc, lb_b, prec);   /* sum_b beta_b R(v_b)  (ball)     */
+            } else {
+                ok = 0;                          /* den guard: whole bound off      */
+            }
+            arb_mat_clear(C_b);
         }
 
-        arb_mat_clear(C);
-        arb_mat_clear(Q);
-        _arb_vec_clear(eigvals, n);
-        _arb_vec_clear(v, n);
-        _arb_vec_clear(Cv, n);
-        arb_clear(b1);
-        arb_clear(num);
-        arb_clear(den);
-        arb_clear(ray);
-        arf_clear(den_lo);
+        if (ok)
+            arb_set(lb_out, acc);
 
-        return ok;   /* 1: lb_out set; 0: den guard tripped, lb_out untouched */
+        arb_clear(beta_b);
+        arb_clear(lb_b);
+        arb_clear(acc);
+        flint_free(covered);
+
+        return ok;   /* 1: lb_out set; 0: a den guard tripped, lb_out untouched */
     }
 }
 

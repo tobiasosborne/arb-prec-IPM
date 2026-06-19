@@ -740,13 +740,52 @@ direction only, never a rigor dependency).
 
 arbsdp_certify_bracket sets lb = max(dual-residual lb §5.4, primal Rayleigh lb): both
 are rigorous lower bounds so their max is rigorous and tighter.  Implemented:
-arbsdp_primal_lower_bound (certify.c).  Measured (max_eigenvalue_2x2 / max_eig_tridiag_3x3
+arbsdp_primal_lower_bound (certify.c) via a static block_rayleigh_lb helper summed in
+ball arithmetic.
+
+SINGLE-BLOCK CASE (bead vry).  Measured (max_eigenvalue_2x2 / max_eig_tridiag_3x3
 / max_eig_path_4 at prec_c = final_prec+128): bracket lb moves from lambda_min(C) (gap ~2)
-to within ~2^-192 of opt (true_opt - lb ~ 1e-192).  APPLICABILITY: single block, single
-trace constraint A_1 = I (conservative exact check; returns 0 -> caller keeps the dual
-bound otherwise).  Per-block trace constraints (separable_12block) and general higher-rank
-/ coupled-constraint feasible primal points (two_block_corr_coupled; shares the primal-PSD-
-projection machinery of UB-B/§5.5, bead 9tm) are follow-ups: bead arb-prec-IPM-oc7.
+to within ~2^-192 of opt (true_opt - lb ~ 1e-192).
+
+FULLY-SEPARABLE PER-BLOCK-TRACE CASE (bead arb-prec-IPM-oc7, generalization of vry).
+A problem is "fully-separable per-block-trace" iff m == nblocks and there is a bijection
+i <-> b_i such that each A_i is EXACTLY the identity I on block b_i and EXACTLY zero on
+all other blocks (each block carries exactly one trace constraint tr(X_b) = beta_b; no
+cross-block coupling), with beta_b >= 0.
+
+Given any nonzero per-block direction v_b, the block-diagonal point
+
+    X_hat = direct-sum_b  ( beta_b * v_b v_b^T / (v_b^T v_b) )
+
+is EXACTLY feasible: each block is rank-1 PSD (beta_b >= 0), and A_i(X_hat) =
+tr(X_hat_{b_i}) = beta_{b_i} = b_i for every i, with no coupling between blocks.
+(There is no Cholesky step, and this works at the PSD boundary, consistent with
+invariant 1.)  By Courant-Fischer applied per block:
+
+    lb_primal = sum_b beta_b * R(v_b)  <=  sum_b beta_b * lambda_max(C_b)  =  opt
+
+and equality is achieved when each v_b is a top eigenvector of C_b.  Evaluated in
+ball arithmetic (each block term: lower(v_b^T C_b v_b)/upper(v_b^T v_b) scaled by
+ball-valued beta_b) the sum is rigorous for any choice of v_b.  The single-block
+case (nblocks == 1) is exactly the vry formula above.
+
+MEASURED (separable_12block: 12 blocks of 2x2, tr(X_c)=1, C_c=[[c,1],[1,0]],
+opt = sum_{c=1..12} (c/2 + sqrt(c^2/4+1)) = 80.5708...): bracket lb moved from
+-2.5708 (gap_lo = 83.14, the loose dual-residual bound) to opt-lb = 3.6e-113 at
+prec_c=384.  The 8 single-block max-eig/diag_weight goldens are unchanged (bit-
+identical).
+
+APPLICABILITY DETECTOR (conservative; a wrong accept is P0).  arbsdp_primal_lower_bound
+checks: (a) m == nblocks; (b) each A_i has exactly one nonzero block entry and that entry
+is exactly the identity -- via arb_is_one / arb_is_zero (zero-radius exact 1/0 only,
+not approximately); (c) bijection i <-> b_i; (d) beta_b >= 0.  Any problem that fails
+any check falls back silently to the dual-residual bound; no warning, no error.
+
+REMAINING FOLLOW-UPS (bead arb-prec-IPM-oc7).  (a) Per-block-trace (above) is now
+SHIPPED (oc7).  Remaining: (b) general coupled / higher-rank feasible points
+(two_block_corr_coupled, mixed_blocks; shares the primal-PSD-projection machinery of
+UB-B/§5.5, bead 9tm); (c) optional k-dim Rayleigh-Ritz subspace bound for problems
+with clustered top eigenvalues.
 
 GOLDEN-REFERENCE PRECISION (vry finding, CLAUDE rule 2/8).  The golden optimal_value
 strings are correctly-rounded to ~65 digits, so for an IRRATIONAL optimum the string sits

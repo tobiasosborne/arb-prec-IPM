@@ -268,41 +268,50 @@ void arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
 
 /*
  * arbsdp_primal_lower_bound -- a rigorous PRIMAL lower bound on the EXTERNAL max
- * optimum via the Rayleigh quotient of a FEASIBLE rank-1 primal point (bead
- * arb-prec-IPM-vry).  This is the PRIMAL MIRROR of arbsdp_lower_bound (which is
- * the DUAL-residual Jansson bound): a feasible PRIMAL point gives a lower bound;
- * a feasible DUAL point gives an upper bound -- here we exhibit a feasible primal.
+ * optimum via the Rayleigh quotient of a FEASIBLE block-diagonal rank-1 primal
+ * point, for the FULLY-SEPARABLE per-block-trace family (bead arb-prec-IPM-oc7;
+ * generalizes the single-block vry case to nblocks >= 1).  This is the PRIMAL
+ * MIRROR of arbsdp_lower_bound (the DUAL-residual Jansson bound): a feasible
+ * PRIMAL point gives a lower bound; a feasible DUAL point gives an upper bound --
+ * here we exhibit a feasible primal.
  *
- * METHOD.  For the single-block, single-trace-constraint external problem
- *     max <C,X>  s.t.  <I,X> = tr(X) = b_1,  X >= 0,
- * the optimum is b_1 * lambda_max(C).  For ANY vector v != 0,
- *     X_hat = b_1 * v v^T / (v^T v)
- * is EXACTLY feasible: it is PSD (a rank-1 outer product, PSD by construction --
- * no Cholesky needed) and tr(X_hat) = b_1 * (v^T v)/(v^T v) = b_1.  Its objective
- *     <C, X_hat> = b_1 * (v^T C v)/(v^T v) = b_1 * R(v),  R(v) = (v^T C v)/(v^T v)
- * the Rayleigh quotient, and R(v) <= lambda_max(C) for EVERY v.  Hence
- *     lb := b_1 * (v^T C v)/(v^T v)
- * (at its lower endpoint) is a rigorous LOWER bound on the optimum, for ANY v.
- * It is TIGHT when v approximates the top eigenvector of C.
+ * METHOD.  For the fully-separable per-block-trace external problem -- m blocks,
+ * each constraint A_i exactly the identity on exactly ONE block b_i and zero
+ * elsewhere (so block b has the single constraint tr(X_b) = beta_b), with beta_b
+ * >= 0 -- the optimum is sum_b beta_b * lambda_max(C_b).  For ANY block vectors
+ * v_b != 0, the block direct-sum
+ *     X_hat = (+)_b  beta_b * v_b v_b^T / (v_b^T v_b)
+ * is EXACTLY feasible: each block is PSD (a rank-1 outer product scaled by
+ * beta_b >= 0 -- PSD by construction, no Cholesky), tr(X_hat_b) = beta_b, and no
+ * constraint couples two blocks.  Its objective
+ *     <C, X_hat> = sum_b beta_b * (v_b^T C_b v_b)/(v_b^T v_b) = sum_b beta_b R(v_b)
+ * with R(v_b) <= lambda_max(C_b) for EVERY v_b (Courant-Fischer).  Hence
+ *     lb := sum_b beta_b * (v_b^T C_b v_b)/(v_b^T v_b)
+ * (at its lower endpoint) is a rigorous LOWER bound on the optimum, for ANY v_b.
+ * It is TIGHT when each v_b approximates the top eigenvector of C_b.  The
+ * single-block single-trace vry case is exactly nblocks == 1 (beta_0 = b_1).
  *
- * RIGOR (CLAUDE.md rule 2, invariant 2): the quotient is evaluated in Arb *ball*
- * arithmetic, so lb is a true enclosure and lb's lower endpoint <= opt REGARDLESS
- * of solve quality -- the bound holds for ANY fixed v.  CRUCIALLY this needs NO
- * eigenvalue rigor and NO PSD certification of X: the rank-1 construction is PSD
- * by construction, which is exactly why it works at the PSD boundary where a
- * verified Cholesky of X FAILS (project invariant 1).  The eigenvector v is
- * chosen POINT-MODE / approximately (arbsdp_eigh's top column of the solver's X,
- * frozen to an EXACT midpoint vector); it is used ONLY as the primal direction
- * and is NOT a rigor dependency -- contrast the strictly-rigorous ball arithmetic
- * of the quotient itself.  A bad v merely loosens lb; it can never make it unsound.
+ * RIGOR (CLAUDE.md rule 2, invariant 2): each per-block quotient is evaluated in
+ * Arb *ball* arithmetic and the blocks are summed in ball arithmetic, so lb is a
+ * true enclosure and lb's lower endpoint <= opt REGARDLESS of solve quality -- the
+ * bound holds for ANY fixed v_b.  CRUCIALLY this needs NO eigenvalue rigor and NO
+ * PSD certification of X: the rank-1 blocks are PSD by construction, which is
+ * exactly why it works at the PSD boundary where a verified Cholesky of X FAILS
+ * (project invariant 1).  Each v_b is chosen POINT-MODE / approximately
+ * (arbsdp_eigh's top column of the solver's X_b, frozen to an EXACT midpoint
+ * vector); it is used ONLY as the primal direction and is NOT a rigor dependency.
+ * A bad v_b merely loosens lb; it can never make it unsound.
  *
- * APPLICABILITY (CONSERVATIVE): returns 1 and sets lb_out only when the rank-1
- * trace construction is provably valid -- single block (p->nblocks == it->nblocks
- * == 1), single constraint (p->m == it->m == 1), and A_1 materializes EXACTLY to
- * the identity I_n (every diagonal entry arb_is_one, every off-diagonal entry
- * arb_is_zero).  Otherwise returns 0 with lb_out untouched, so the caller falls
- * back to the rigorous dual bound (safe).  Multi-block / multi-constraint /
- * higher-rank feasible points are follow-ups.
+ * APPLICABILITY (CONSERVATIVE -- a wrong ACCEPT is a P0, so it prefers rejecting):
+ * returns 1 and sets lb_out only when the block-diagonal rank-1 trace construction
+ * is provably valid -- m == nblocks (== it->nblocks == it->m); each constraint A_i
+ * (matno i) materializes EXACTLY to the identity on EXACTLY one block (every
+ * diagonal entry arb_is_one, every off-diagonal arb_is_zero) and EXACTLY zero on
+ * every other block; the map i -> b_i is a bijection onto {0..nblocks-1} (each
+ * block pinned by exactly one constraint); and each beta_b = b_{i_b-1} has lower
+ * endpoint >= 0.  Otherwise returns 0 with lb_out untouched, so the caller falls
+ * back to the rigorous dual bound (safe).  Coupled / multi-constraint-per-block /
+ * higher-rank feasible points are oc7 (b)/(c).
  *
  * Citation: R(v) <= lambda_max(C) is standard (Parlett, "The Symmetric
  * Eigenvalue Problem", 1998, the Rayleigh-quotient / Courant-Fischer min-max);

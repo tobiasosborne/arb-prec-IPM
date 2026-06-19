@@ -70,6 +70,28 @@ start Layer-1 work until the Layer-0 approximate solver is correct and performan
   Layer-1's certified-bracket job — follow-up **arb-prec-IPM-wf5** (blocked on
   oc7). Cost: one confirming solve per problem (warm-start b31 would amortize it).
 
+- **oc7 part (a) DONE (2026-06-19):** tighten the rigorous `lb` for the
+  FULLY-SEPARABLE per-block-trace family (vry generalization). `vry` made the
+  primal Rayleigh `lb` tight only for single-block single-trace max-eig problems;
+  `arbsdp_primal_lower_bound` (`certify.c`) is now generalized via a static
+  `block_rayleigh_lb` helper summed over blocks, gated by a CONSERVATIVE
+  applicability detector (m==nblocks, bijective decoupled exact-`I`-per-block
+  constraints, `beta_b>=0` — a wrong accept is a P0, so anything else falls back
+  to the dual bound). For `X_hat = (+)_b beta_b v_b v_b^T/(v_b^T v_b)` (PSD by
+  construction, exactly feasible since each constraint is `I` on one block),
+  `lb = sum_b beta_b R(v_b) <= opt`. Measured: `separable_12block` lb moved from
+  `-2.5708` (gap_lo 83.14, the loose single-dual bound) to `opt-lb = 3.6e-113`
+  (prec_c=384); the 8 single-block goldens are bit-identical (no regression);
+  `two_block_corr_coupled`/`sdp_sqrt2`/`trivial_2x2` correctly REJECTED (detector
+  returns 0, lb stays the valid dual bound). TDD: `test_separable_primal_tight`
+  (tightness gate `opt-lb<1e-40` vs the closed-form `sum_c c/2+sqrt(c^2/4+1)`) +
+  `test_detector_rejects_coupled`; detector + rigor mutations both bit. 14/14
+  ctest normal+ASan, -Wall clean. REMAINING oc7: (b) general coupled/higher-rank
+  via rigorous primal-PSD-projection (`two_block_corr_coupled` gap 6.36,
+  `mixed_blocks`) -> **arb-prec-IPM-8jr** (blocks oc7, shares 9tm/UB-B machinery);
+  (c) optional Rayleigh-Ritz subspace -> **arb-prec-IPM-801**. `wf5` stays blocked
+  on oc7 until (b).
+
 ## Current state (2026-06-02)
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build
