@@ -1,0 +1,11 @@
+* unbounded_eig - 2x2 SDP: max X_11 s.t. X_22 = 1, X blkdiag >= 0
+* PRIMAL UNBOUNDED (== dual infeasible): only X_22 is pinned; X_11 is free to grow
+*   along the PSD cone, so the objective max X_11 is +infinity.
+* Recession ray Xhat = E_11: <A_1,Xhat> = 0 (A_1 = E_22), <C,Xhat> = 1 > 0,
+*   and Xhat >= 0 (eigs 1,0), giving an unbounded improving direction.
+1
+1
+2
+1.0000000000000000000000000000000000000000000000000000000000000000
+0 1 1 1 1.0000000000000000000000000000000000000000000000000000000000000000
+1 1 2 2 1.0000000000000000000000000000000000000000000000000000000000000000

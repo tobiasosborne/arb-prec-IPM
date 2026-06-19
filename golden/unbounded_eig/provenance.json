@@ -1,0 +1,21 @@
+{
+  "name": "unbounded_eig",
+  "source": "hand-constructed (arb-prec-IPM-epic.2)",
+  "description": "2x2 SDP: max X_11 s.t. X_22 = 1, X >= 0. Primal UNBOUNDED (objective +infinity): only X_22 is pinned, so X_11 grows freely inside the PSD cone. Maps to the dual_infeasible status class (expected_solve_status('unbounded') -> DUAL_INFEASIBLE). Detected via tau -> 0 with kappa bounded away from 0 carrying the dual-infeasibility certificate.",
+  "m": 1,
+  "nblocks": 1,
+  "block_sizes": [2],
+  "maximize": true,
+  "expected_status": "unbounded",
+  "witness": "Recession ray Xhat = E_11: <A_1,Xhat> = 0 (A_1 = E_22), <C,Xhat> = 1 > 0, and Xhat >= 0 (eigs 1,0). Xhat is a feasible improving direction of unbounded length, certifying primal unboundedness (= dual infeasibility).",
+  "optimal_value": "none (unbounded, +infinity)",
+  "optimal_value_digits": 0,
+  "target_digits": 1,
+  "prec_cap": 256,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 1000000000,
+  "expected_max_iters": 50,
+  "measured_iters_prec128": 3,
+  "generated_by": "arbsdp golden-master generator epic.2 (infeasible/unbounded corpus)",
+  "known_gaps": []
+}

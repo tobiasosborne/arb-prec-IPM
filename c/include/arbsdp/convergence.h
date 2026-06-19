@@ -51,14 +51,17 @@ extern "C" {
 #define ARBSDP_STALL_ITER_CAP 10
 
 /* Status codes for the Layer-0 termination test (HsdeNtSdpSolver.ts status
- * vocabulary).  Infeasibility-certificate branches are stubbed here (b20 wires
- * the verified Farkas test); ARBSDP_STATUS_RUNNING is returned in those regimes
- * for now (the optimal branch and the scaling are the b11 deliverable). */
+ * vocabulary).  The PRIMAL/DUAL_INFEASIBLE values are set by the point-mode
+ * (tau,kappa) classification wired in epic.2 (MATH_SPEC §3.8.1).  This is a
+ * Layer-0 steering status only -- it certifies nothing.  The rigorous
+ * ball-verified Farkas certificate is bead b20. */
 typedef enum {
     ARBSDP_STATUS_RUNNING           = 0,  /* no terminal classification yet     */
     ARBSDP_STATUS_OPTIMAL           = 1,  /* rho<=1 all three + prstatus>0.5    */
-    ARBSDP_STATUS_PRIMAL_INFEASIBLE = 2,  /* STUB (b20): currently never set    */
-    ARBSDP_STATUS_DUAL_INFEASIBLE   = 3   /* STUB (b20): currently never set    */
+    ARBSDP_STATUS_PRIMAL_INFEASIBLE = 2,  /* point-mode (tau,kappa) class (epic.2);
+                                           * rigorous Farkas cert: b20          */
+    ARBSDP_STATUS_DUAL_INFEASIBLE   = 3   /* point-mode (tau,kappa) class (epic.2);
+                                           * rigorous Farkas cert: b20          */
 } arbsdp_status;
 
 /*
@@ -91,8 +94,9 @@ typedef struct {
  * The scaling norms ||b||_inf and ||C||_F are computed from the problem data at
  * precision `prec` (point mode; converted to double for the ratios).  status is
  * ARBSDP_STATUS_OPTIMAL iff rho_p<=1 && rho_d<=1 && rho_g<=1 && prstatus>0.5 and
- * the anti-collapse floor (tau+kappa >= 1e-8) holds; otherwise ARBSDP_STATUS_
- * RUNNING (infeasibility branches are b20).
+ * the anti-collapse floor (tau+kappa >= 1e-8) holds; ARBSDP_STATUS_PRIMAL/DUAL_
+ * INFEASIBLE iff the (tau,kappa) point-mode test fires (MATH_SPEC §3.8.1);
+ * otherwise ARBSDP_STATUS_RUNNING.  Rigorous Farkas certs: b20.
  */
 void arbsdp_check_convergence(arbsdp_convergence *out, const arbsdp_iterate *it,
                               double feas_tol, double opt_tol, slong prec);

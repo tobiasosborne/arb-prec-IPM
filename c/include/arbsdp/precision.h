@@ -120,7 +120,14 @@ extern "C" {
  */
 typedef enum {
     ARBSDP_ADAPTIVE_OPTIMAL = 1,  /* a candidate OPTIMAL solve was CONFIRMED by the next-higher precision (cross-precision stability, p68) */
-    ARBSDP_ADAPTIVE_LIMIT   = 2   /* prec_max reached without meeting target (honest) */
+    ARBSDP_ADAPTIVE_LIMIT   = 2,  /* prec_max reached without meeting target (honest) */
+    ARBSDP_ADAPTIVE_INFEASIBLE = 3 /* a terminal infeasibility classification (POINT MODE, epic.2):
+                                    * the fixed solve classified PRIMAL/DUAL infeasible
+                                    * via the (tau,kappa) collapse; this is precision-
+                                    * INDEPENDENT (more precision will not change it) so
+                                    * the controller does NOT escalate.  See
+                                    * res->res.status for primal vs dual.  NOT the
+                                    * rigorous ball-verified Farkas cert (bead b20). */
 } arbsdp_adaptive_status;
 
 /*

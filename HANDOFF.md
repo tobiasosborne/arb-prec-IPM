@@ -92,6 +92,31 @@ start Layer-1 work until the Layer-0 approximate solver is correct and performan
   (c) optional Rayleigh-Ritz subspace -> **arb-prec-IPM-801**. `wf5` stays blocked
   on oc7 until (b).
 
+- **epic.2 DONE (2026-06-19):** infeasible/unbounded corpus + the POINT-MODE
+  (tau,kappa) status-class detection it needs. `convergence.c:166` previously
+  STUBBED the infeasibility branch citing invariant 8; epic.2 (owner-created)
+  authorizes the Layer-0 point-mode classification (it STEERS the loop / yields the
+  status CLASS, exactly like the point-mode `OPTIMAL` status — the RIGOROUS
+  ball-verified Farkas cert is still b20). Wired (port of TS `checkHsdeTermination`,
+  ART 2003): primal-infeasible (`prstatus<-0.5 && dObj>1e-6 && dualInf small`) and
+  dual-infeasible/unbounded (`prstatus<-0.5 && pObj<-1e-6 && primalInf small`),
+  primal tested FIRST to disambiguate. **A `tau<1` collapse guard was REQUIRED
+  beyond the TS port** (a P0 found in verification): on `disparate_scale_sqrt2`
+  (cond~4e32) a precision-starved transient blows kappa to 3.6e16 with tau~10,
+  prstatus=-1.0, faking a Farkas witness — `tau<1` rejects it (the cert is the
+  tau->0 limit; genuine firings have tau in [7e-11, 4e-4]). `solve.c` breaks at the
+  FIRING iterate (skips the best-by-gap snapshot restore — else the cert iterate is
+  lost). `precision.c` is terminal on infeasibility (`ARBSDP_ADAPTIVE_INFEASIBLE`,
+  no escalation). Corpus (6, all with analytic witnesses, auto-discovered):
+  `primal_infeasible_psd`, `primal_infeasible_minor` (PSD 2x2-minor, Farkas
+  y=(-1,-1,1)), `unbounded_eig`, `unbounded_lp` (LP/diag block), `dual_infeasible_diag`,
+  `dual_infeasible_3x3`. test_golden now 22 problems, GATE PASS (38 pairs, 0 FAIL);
+  the 16 optimal goldens UNCHANGED (no misfire). new `c/test/test_infeasible.c`
+  (TDD: P2/P3/P5 incl. the firing-iterate case + feasible-no-misfire + mutation).
+  15/15 ctest normal+ASan, -Wall clean, valgrind definitely/indirectly-lost=0.
+  **b20** (rigorous ball-verified Farkas cert, certify side) now has its corpus and
+  is the natural next bead.
+
 ## Current state (2026-06-02)
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build

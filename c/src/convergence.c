@@ -163,8 +163,66 @@ arbsdp_check_convergence(arbsdp_convergence *out, const arbsdp_iterate *it,
         return;
     }
 
-    /* Infeasibility-certificate branches are STUBBED here (bead b20 wires the
-     * verified Farkas test in ball arithmetic; a float64 heuristic here would
-     * violate CLAUDE.md invariant 8).  Everything else is running. */
+    /* POINT-MODE (tau,kappa) infeasibility status-class detection wired (bead
+     * arb-prec-IPM-epic.2).  This is the Layer-0 status CLASS that STEERS the
+     * loop -- exactly analogous to ARBSDP_STATUS_OPTIMAL above (b19's bracket
+     * certifies that independently).  It reads float64 from the iterate
+     * midpoints and certifies NOTHING.  CLAUDE.md invariant 8's "verified Farkas
+     * certificate in ball arithmetic" governs the RIGOROUS user-facing
+     * certify-side status (bead b20, separate); it does NOT forbid this
+     * point-mode steering status (solve.h documents solve_status as "POINT-mode
+     * classifications steering the loop -- NOT the rigorous Layer-1 status").
+     * The rigorous ball-verified Farkas cert remains bead b20.
+     *
+     * GROUND TRUTH (HsdeNtSdpSolver.ts checkHsdeTermination; Andersen-Roos-
+     * Terlaky 2003 HSDE: tau->0, kappa>0 carries the Farkas certificate).  The
+     * prstatus<-0.5 (kappa-dominant) guard makes the optimal (tau-dominant,
+     * prstatus>0.5) and infeasible regimes NON-overlapping, so a feasible problem
+     * (prstatus=+1.0) never fires here.  The anti-collapse floor (tk<1e-8) and
+     * the optimal check above run FIRST.  PRIMAL-INFEASIBLE is tested FIRST: it
+     * disambiguates problems that satisfy both predicates. */
+    {
+        const double eps_inf = (feas_tol > 1e-8) ? feas_tol : 1e-8;
+        const double WITNESS_FLOOR = 1e-6;
+
+        /* TAU-COLLAPSE guard.  The HSDE infeasibility certificate is the tau->0
+         * limit (Andersen-Roos-Terlaky 2003): the recession ray / Farkas witness
+         * is read off the iterate only as tau collapses.  tau initialises to 1
+         * (MATH_SPEC §3.9), so a healthy or merely transient iterate keeps tau of
+         * order 1; tau < TAU_INFEAS (=1) means tau is genuinely collapsing.
+         *
+         * The prstatus<-0.5 (kappa-dominant) guard ALONE is NOT sufficient: on an
+         * extreme disparate-scale FEASIBLE problem (golden disparate_scale_sqrt2,
+         * cond(M) ~ 4e32) the first point-mode step transiently blows kappa to
+         * ~3.6e16 while tau stays ~10, giving prstatus=-1.0 with a witness test
+         * that passes ONLY because dObj (= kappa here) is huge -- a precision-
+         * starved transient, NOT a Farkas certificate.  Requiring tau < 1 rejects
+         * it (tau ~10, GROWN above init) while admitting every genuine collapse
+         * (the de-risk corpus fires at tau in [7.2e-11, 4.1e-4], all << 1).  This
+         * is a POINT-MODE steering guard, not a rigor claim (CLAUDE.md rule 1);
+         * the rigorous ball-verified Farkas cert is bead b20. */
+        const double TAU_INFEAS = 1.0;
+        const int tau_collapsing = (tau < TAU_INFEAS);
+
+        /* PRIMAL-INFEASIBLE (Farkas y: Sum y_i A_i <= 0, b^T y > 0): the dual
+         * objective grows away from zero (dObj > floor) while the dual residual
+         * stays at zero (the y is a genuine improving ray of the dual). */
+        if (tau_collapsing && prstatus < -0.5 && dObj > WITNESS_FLOOR &&
+            dualInf <= eps_inf * (1.0 + fabs(dObj))) {
+            out->status = ARBSDP_STATUS_PRIMAL_INFEASIBLE;
+            return;
+        }
+
+        /* DUAL-INFEASIBLE / primal unbounded (recession ray X: A(X)->0,
+         * <C,X> < 0 in the internal min form): the primal objective drops away
+         * from zero while the primal residual stays at zero. */
+        if (tau_collapsing && prstatus < -0.5 && pObj < -WITNESS_FLOOR &&
+            primalInf <= eps_inf * (1.0 + fabs(pObj))) {
+            out->status = ARBSDP_STATUS_DUAL_INFEASIBLE;
+            return;
+        }
+    }
+
+    /* Otherwise still running. */
     out->status = ARBSDP_STATUS_RUNNING;
 }

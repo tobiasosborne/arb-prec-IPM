@@ -250,6 +250,34 @@ arbsdp_solve_adaptive(arbsdp_adaptive_result *res, const arbsdp_problem *p,
         }
         count++;
 
+        /* POINT-MODE infeasibility is TERMINAL and precision-INDEPENDENT (bead
+         * arb-prec-IPM-epic.2): a PRIMAL/DUAL infeasible classification will not
+         * change with more precision (it is a (tau,kappa)-collapse status class,
+         * not a precision-starved gap), so do NOT escalate.  Return immediately
+         * with res->res holding the infeasible solve and res->status set; the
+         * caller reads res->res.status for primal vs dual.  NOT the rigorous
+         * ball-verified Farkas cert (bead b20).
+         *
+         * MEMORY (CLAUDE.md rule 7): the prec_history step is already recorded
+         * above from `slot`.  For a genuinely infeasible problem the FIRST solve
+         * classifies infeasible, so have_cand is false and slot == &res->res (the
+         * live owned slot) -- nothing to move.  Defensively, if a candidate
+         * existed (slot == &scratch), MOVE scratch into res->res exactly as the
+         * OPTIMAL-promotion path does (clear the old res->res first, then shallow
+         * swap) so res->res owns the infeasible solve and the cleared husk is left
+         * in scratch (not double-cleared).  Exactly one owned result lives in
+         * res->res; scratch is moved, never leaked. */
+        if (st == ARBSDP_SOLVE_PRIMAL_INFEASIBLE ||
+            st == ARBSDP_SOLVE_DUAL_INFEASIBLE) {
+            if (slot != &res->res) {
+                arbsdp_result_clear(&res->res);
+                arbsdp_result_swap(&res->res, &scratch);
+            }
+            res->final_prec = prec;
+            res->status     = ARBSDP_ADAPTIVE_INFEASIBLE;
+            return res->status;
+        }
+
         if (!have_cand) {
             /* No candidate yet (the very first solve, or every prior solve was
              * non-OPTIMAL).  An OPTIMAL solve becomes the candidate; otherwise the

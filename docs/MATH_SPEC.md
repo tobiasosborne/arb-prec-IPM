@@ -417,13 +417,68 @@ iterate, no classification possible).
 **Termination conditions:**
 
     optimal:             rho_p <= 1 AND rho_d <= 1 AND rho_g <= 1 AND prstatus > 0.5
-    primal-infeasible:   prstatus < -0.5 AND dObj > 1e-6 AND dualInf <= eps_inf*(1+|dObj|)
-    dual-infeasible:     prstatus < -0.5 AND pObj < -1e-6 AND primalInf <= eps_inf*(1+|pObj|)
-
-where `eps_inf = max(feasTol, 1e-8)`.
+    primal-infeasible:   see §3.8.1 below
+    dual-infeasible:     see §3.8.1 below
 
 Resource limits: iter >= iterLimit => "iter-limit"; wall > timeLimitSec => "time-limit";
 stallCount >= stallIterCap => "numerical-difficulty".
+
+#### §3.8.1 Infeasibility classification (point mode) — bead arb-prec-IPM-epic.2
+
+This sub-test runs AFTER the anti-collapse floor and the optimal check.  It reads
+float64 midpoints (point mode) and sets the Layer-0 status class that steers the
+loop — exactly analogous to ARBSDP_STATUS_OPTIMAL.  It certifies NOTHING.  The
+rigorous ball-verified Farkas certificate is bead b20; CLAUDE.md invariant 8
+governs that separate rigorous status.
+
+Source: HsdeNtSdpSolver.ts:1093-1131 (`checkHsdeTermination`); ground-truth theory:
+Andersen-Roos-Terlaky 2003, HSDE section — tau -> 0 with kappa > 0 carries the
+Farkas certificate.
+
+**Constants:**
+
+    eps_inf      =  max(feasTol, 1e-8)
+    WITNESS_FLOOR  =  1e-6
+    TAU_INFEAS   =  1.0      (tau initialises to 1; tau < 1 means genuinely collapsing)
+
+**TAU-COLLAPSE guard (required in addition to prstatus < -0.5):**
+
+The HSDE infeasibility certificate is the tau -> 0 limit.  The prstatus < -0.5
+(kappa-dominant) guard alone is not sufficient: on an extreme disparate-scale
+FEASIBLE problem (golden disparate_scale_sqrt2, cond(M) ~ 4e32) the first
+point-mode step transiently blows kappa to ~3.6e16 while tau stays ~10, giving
+prstatus = -1.0 with a witness test that passes only because dObj is huge — a
+precision-starved transient, not a Farkas certificate.  Requiring tau < 1 rejects
+it (tau ~ 10, grown above init) while admitting every genuine collapse (the de-risk
+corpus fires at tau in [7.2e-11, 4.1e-4], all << 1).
+
+**Classification (tested in order; PRIMAL-INFEASIBLE first to disambiguate):**
+
+    tau_collapsing  =  (tau < TAU_INFEAS)
+
+    PRIMAL-INFEASIBLE (Farkas y: Sum_i y_i A_i^b <= 0, b^T y > 0):
+        tau_collapsing AND prstatus < -0.5
+        AND dObj > WITNESS_FLOOR
+        AND dualInf <= eps_inf * (1 + |dObj|)
+
+    DUAL-INFEASIBLE / primal unbounded (recession ray X: A(X)->0, <C,X> < 0):
+        tau_collapsing AND prstatus < -0.5
+        AND pObj < -WITNESS_FLOOR
+        AND primalInf <= eps_inf * (1 + |pObj|)
+
+Note: pObj and dObj here are the un-purified (tau-scaled) raw objectives from the
+iterate, not pObjPure/dObjPure.  The kappa-dominant regime (prstatus < -0.5) and
+the optimal regime (prstatus > 0.5) are non-overlapping, so a feasible problem
+never triggers the infeasibility branch.
+
+**Solver behaviour on infeasibility:** `arbsdp_solve_adaptive` treats an
+infeasibility status as terminal (ARBSDP_ADAPTIVE_INFEASIBLE) and does not
+escalate precision.  The solver returns the status from the firing iterate, not the
+best-by-gap snapshot.
+
+**Golden corpus (epic.2):** primal_infeasible_psd, primal_infeasible_minor,
+unbounded_eig, unbounded_lp, dual_infeasible_diag, dual_infeasible_3x3 — each with
+an analytic Farkas/recession witness; test_golden asserts the status class.
 
 **Default tolerances (Defaults.ts:34-49):**
 

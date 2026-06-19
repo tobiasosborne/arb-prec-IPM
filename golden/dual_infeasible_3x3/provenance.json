@@ -1,0 +1,21 @@
+{
+  "name": "dual_infeasible_3x3",
+  "source": "hand-constructed (arb-prec-IPM-epic.2)",
+  "description": "3x3 SDP: max X_11 s.t. X_22 = 1, X_33 = 1, X >= 0. The primal is UNBOUNDED (X_11 grows freely while X_22, X_33 are pinned), so the DUAL is infeasible. A larger (3x3) instance of dual infeasibility to exercise the detector beyond 2x2; solver reports DUAL_INFEASIBLE in 4 iters at prec=128.",
+  "m": 2,
+  "nblocks": 1,
+  "block_sizes": [3],
+  "maximize": true,
+  "expected_status": "dual_infeasible",
+  "witness": "Recession ray Xhat = E_11: <A_1,Xhat> = 0 (A_1 = E_22), <A_2,Xhat> = 0 (A_2 = E_33), <C,Xhat> = 1 > 0 (C = E_11), Xhat >= 0 (eigs 1,0,0). Primal unboundedness along Xhat certifies dual infeasibility.",
+  "optimal_value": "none (dual infeasible; primal unbounded)",
+  "optimal_value_digits": 0,
+  "target_digits": 1,
+  "prec_cap": 256,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 1000000000,
+  "expected_max_iters": 50,
+  "measured_iters_prec128": 4,
+  "generated_by": "arbsdp golden-master generator epic.2 (infeasible/unbounded corpus)",
+  "known_gaps": []
+}

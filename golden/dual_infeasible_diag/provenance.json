@@ -1,0 +1,21 @@
+{
+  "name": "dual_infeasible_diag",
+  "source": "hand-constructed (arb-prec-IPM-epic.2)",
+  "description": "2x2 SDP: max <I,X> = tr X s.t. X_12 = 0 (encoded as <A_1,X> = 2*X_12 = 0), X >= 0. The primal is UNBOUNDED (the diagonal of X is free, so tr X -> +infinity), which means the DUAL is infeasible. The solver reports DUAL_INFEASIBLE directly. Distinct from the 'unbounded'-tagged cases: here the objective is the full trace and the single constraint is an off-diagonal pin.",
+  "m": 1,
+  "nblocks": 1,
+  "block_sizes": [2],
+  "maximize": true,
+  "expected_status": "dual_infeasible",
+  "witness": "Recession ray Xhat = E_11: <A_1,Xhat> = 0 (A_1 = [[0,1],[1,0]], so <A_1,Xhat> = 2*Xhat_12 = 0), <C,Xhat> = 1 > 0 (C = I), Xhat >= 0 (eigs 1,0). Primal unboundedness along Xhat certifies dual infeasibility.",
+  "optimal_value": "none (dual infeasible; primal unbounded)",
+  "optimal_value_digits": 0,
+  "target_digits": 1,
+  "prec_cap": 256,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 1000000000,
+  "expected_max_iters": 50,
+  "measured_iters_prec128": 2,
+  "generated_by": "arbsdp golden-master generator epic.2 (infeasible/unbounded corpus)",
+  "known_gaps": []
+}

@@ -1,0 +1,21 @@
+{
+  "name": "primal_infeasible_psd",
+  "source": "hand-constructed (arb-prec-IPM-epic.2)",
+  "description": "2x2 SDP: max X_22 s.t. X_11 = -1, X >= 0. Infeasible because the diagonal of a PSD matrix must be >= 0, so X_11 = -1 admits no PSD feasible point. Tests the simplest primal-infeasibility detection via (tau,kappa): tau -> 0 with kappa bounded away from 0.",
+  "m": 1,
+  "nblocks": 1,
+  "block_sizes": [2],
+  "maximize": true,
+  "expected_status": "primal_infeasible",
+  "witness": "Farkas y = (-1): sum_i y_i A_i = -E_11 (eigs -1,0) <= 0, and b^T y = (-1)*(-1) = 1 > 0. Hence no X >= 0 satisfies <A_1,X> = b_1 (Jansson-Chaykin-Keil 2007 Farkas alternative).",
+  "optimal_value": "none (primal infeasible)",
+  "optimal_value_digits": 0,
+  "target_digits": 1,
+  "prec_cap": 256,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 1000000000,
+  "expected_max_iters": 50,
+  "measured_iters_prec128": 4,
+  "generated_by": "arbsdp golden-master generator epic.2 (infeasible/unbounded corpus)",
+  "known_gaps": []
+}

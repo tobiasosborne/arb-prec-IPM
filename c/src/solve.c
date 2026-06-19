@@ -336,6 +336,11 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
     arbsdp_solve_status fallback = ARBSDP_SOLVE_ITER_LIMIT;
     arbsdp_solve_status status;
     int                strict_optimal = 0;
+    /* POINT-MODE infeasibility classification (bead arb-prec-IPM-epic.2): set
+     * non-zero when the 6-flag test classifies the FIRING iterate as PRIMAL/
+     * DUAL infeasible (tau-collapse).  0 = not infeasible.  This is a Layer-0
+     * status CLASS, not a rigorous Farkas cert (b20). */
+    arbsdp_solve_status infeasible_status = 0;
     int                iter = 0;
 
     arb_t mu_old, thresh;                  /* stall detection scratch (cached)  */
@@ -390,6 +395,21 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
         /* Strict optimal exit (TS:485-487 term.status !== "running"). */
         if (conv.status == ARBSDP_STATUS_OPTIMAL) {
             strict_optimal = 1;
+            break;
+        }
+
+        /* POINT-MODE infeasibility exit (bead arb-prec-IPM-epic.2): the 6-flag
+         * test classified the CURRENT iterate `it` (which holds the just-checked
+         * residuals -- the FIRING iterate that collapsed tau) as infeasible.
+         * Break here so res->it carries that firing iterate (its tau/kappa/pObj/
+         * dObj are the certificate data for the certify side, b20).  This is a
+         * Layer-0 status CLASS that steers the loop, NOT a rigorous Farkas cert. */
+        if (conv.status == ARBSDP_STATUS_PRIMAL_INFEASIBLE) {
+            infeasible_status = ARBSDP_SOLVE_PRIMAL_INFEASIBLE;
+            break;
+        }
+        if (conv.status == ARBSDP_STATUS_DUAL_INFEASIBLE) {
+            infeasible_status = ARBSDP_SOLVE_DUAL_INFEASIBLE;
             break;
         }
 
@@ -460,30 +480,40 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
             stall_count = 0;
     }
 
-    /* finalizeBestOr (TS:913-926): a strict pass is OPTIMAL; otherwise a
+    /* finalizeBestOr (TS:913-926): a strict pass is OPTIMAL; a POINT-MODE
+     * infeasibility classification (epic.2) is terminal next; otherwise a
      * soft-optimal best snapshot lifts to OPTIMAL, else the honest fallback. */
     if (strict_optimal) {
         status = ARBSDP_SOLVE_OPTIMAL;
+    } else if (infeasible_status) {
+        status = infeasible_status;
     } else if (have_best && best_soft_optimal) {
         status = ARBSDP_SOLVE_OPTIMAL;
     } else {
         status = fallback;
     }
 
-    /* On any NON-strict exit, restore the best snapshot so res->it carries the
-     * best iterate and res->value the best-effort value (solve.h).  On a strict
-     * optimal exit the working `it` IS the converged iterate; keep it. */
-    if (!strict_optimal && have_best) {
+    /* On any NON-strict, NON-infeasible exit, restore the best snapshot so
+     * res->it carries the best iterate and res->value the best-effort value
+     * (solve.h).  For an INFEASIBLE exit the restore is SKIPPED: res->it must
+     * stay the FIRING iterate (its collapsed tau/kappa and pObj/dObj are the
+     * certificate data, epic.2) -- the best-by-gap snapshot PREDATES the
+     * tau-collapse and would lose it.  On a strict optimal exit the working `it`
+     * IS the converged iterate; keep it. */
+    if (!strict_optimal && !infeasible_status && have_best) {
         copy_iterate_vars(it, &best, prec);
         iter = best_iter;
     }
 
-    /* Recompute residuals/objectives on the FINAL (best) iterate so res->mu and
-     * the recovered value are consistent with what res->it holds. */
+    /* Recompute residuals/objectives on the FINAL (best or firing) iterate so
+     * res->mu and the recovered value are consistent with what res->it holds. */
     arbsdp_iterate_residuals(it, prec);
     arb_set(res->mu, it->mu);
 
-    /* 3. Recover the user-facing objective (purify + sign flip; banner). */
+    /* 3. Recover the user-facing objective (purify + sign flip; banner).  NOTE:
+     * for an INFEASIBLE status the recovered value is NOT meaningful (tau -> 0
+     * on the firing iterate makes pObj/tau large/meaningless); the STATUS is the
+     * result (epic.2).  recover_value still runs so res->value is well-formed. */
     recover_value(res->value, it, p->maximize, prec);
 
     res->status = status;

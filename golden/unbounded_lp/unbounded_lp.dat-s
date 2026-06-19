@@ -1,0 +1,10 @@
+* unbounded_lp - LP via one diagonal block of size 2 (block_size = -2): max x_1 s.t. x_2 = 1, x >= 0
+* PRIMAL UNBOUNDED (== dual infeasible): only x_2 is pinned; x_1 >= 0 is free to grow,
+*   so the objective max x_1 is +infinity. Exercises the diagonal (LP) cone path.
+* Recession ray xhat = (1,0): A_1 . xhat = 0 (A_1 pins x_2), c . xhat = 1 > 0, xhat >= 0.
+1
+1
+-2
+1.0000000000000000000000000000000000000000000000000000000000000000
+0 1 1 1 1.0000000000000000000000000000000000000000000000000000000000000000
+1 1 2 2 1.0000000000000000000000000000000000000000000000000000000000000000

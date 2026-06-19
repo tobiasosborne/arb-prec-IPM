@@ -1,0 +1,21 @@
+{
+  "name": "primal_infeasible_minor",
+  "source": "hand-constructed (arb-prec-IPM-epic.2)",
+  "description": "2x2 SDP pinning X_11=1, X_22=1, X_12=2 (the off-diagonal constraint <A_3,X> = 2*X_12 = 4 fixes X_12=2). Infeasible because the 2x2 PSD principal-minor inequality X_11*X_22 >= X_12^2 reduces to 1 >= 4, which is false. A well-conditioned primal-infeasible problem (no singular Schur / tau NaN): tau -> 6e-11, kappa -> 25 at prec=128.",
+  "m": 3,
+  "nblocks": 1,
+  "block_sizes": [2],
+  "maximize": true,
+  "expected_status": "primal_infeasible",
+  "witness": "Farkas y = (-1,-1,1): sum_i y_i A_i = [[-1,1],[1,-1]] (eigs 0,-2) <= 0, and b^T y = (1)(-1)+(1)(-1)+(4)(1) = 2 > 0. Verified numerically (eigvalsh, det = 0). Hence no X >= 0 satisfies all three constraints (Farkas alternative).",
+  "optimal_value": "none (primal infeasible)",
+  "optimal_value_digits": 0,
+  "target_digits": 1,
+  "prec_cap": 256,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 1000000000,
+  "expected_max_iters": 50,
+  "measured_iters_prec128": 5,
+  "generated_by": "arbsdp golden-master generator epic.2 (infeasible/unbounded corpus)",
+  "known_gaps": []
+}

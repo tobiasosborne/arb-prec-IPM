@@ -233,6 +233,27 @@ target_link_libraries(test_solve PRIVATE arbsdp m)
 
 add_test(NAME test_solve COMMAND test_solve)
 
+add_executable(test_infeasible test/test_infeasible.c)
+
+target_include_directories(test_infeasible
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+# test_infeasible loads the feasible golden (max_eigenvalue_2x2) for the
+# no-misfire regression; pass an absolute golden path so the test is
+# independent of the run directory (as test_io / test_solve do).  It also
+# writes embedded infeasible .dat-s specs to /tmp.
+target_compile_definitions(test_infeasible
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+target_link_libraries(test_infeasible PRIVATE arbsdp)
+
+add_test(NAME test_infeasible COMMAND test_infeasible)
+
 add_executable(test_precision test/test_precision.c)
 
 target_include_directories(test_precision
