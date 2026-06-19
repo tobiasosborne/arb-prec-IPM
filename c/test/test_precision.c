@@ -397,6 +397,149 @@ test_mutation_guards(void)
     }
 }
 
+/* ------------------------------------------------------------------------- *
+ * Test 6: CONFIRM GATE (bead arb-prec-IPM-p68).  Pins arbsdp_adaptive_confirmed *
+ * with CONSTRUCTED arb values (no solver -- deterministic + fast).  The gate    *
+ * confirms a candidate iff the confirming solve is OPTIMAL AND its value agrees  *
+ * with the candidate to >= target_digits.  Case 1 is the p68 discriminator: a   *
+ * candidate that DISAGREES with the higher-precision confirming solve beyond the *
+ * target is NOT confirmed (the precision-starved-OPTIMAL class).                 *
+ * ------------------------------------------------------------------------- */
+static void
+test_confirm_gate(void)
+{
+    arb_t v_cand, v_conf;
+    arb_init(v_cand); arb_init(v_conf);
+
+    /* Case 1: agreement ~6.7 digits (|diff|=2e-7, rel=1) < target 12 -> 0.
+     * This is the p68 discriminator -- a stub that ignores agreement returns 1. */
+    arb_set_str(v_cand, "1.0000002", WORKPREC);
+    arb_set_str(v_conf, "1.0",       WORKPREC);
+    CHECK(arbsdp_adaptive_confirmed(ARBSDP_SOLVE_OPTIMAL, v_cand, v_conf, 12, WORKPREC) == 0,
+          "confirm: candidate disagreeing beyond target must NOT be confirmed (p68)");
+
+    /* Case 2: agreement ~15 digits (|diff|=1e-15, rel=1) >= target 12 -> 1. */
+    arb_set_str(v_cand, "1.000000000000001", WORKPREC);
+    arb_set_str(v_conf, "1.0",               WORKPREC);
+    CHECK(arbsdp_adaptive_confirmed(ARBSDP_SOLVE_OPTIMAL, v_cand, v_conf, 12, WORKPREC) == 1,
+          "confirm: candidate agreeing to >= target must be confirmed");
+
+    /* Case 3: exact agreement at a high target -> 1 (+inf agreement). */
+    arb_set_str(v_cand, "1.2345678901234567890123456789012345", WORKPREC);
+    arb_set(v_conf, v_cand);
+    CHECK(arbsdp_adaptive_confirmed(ARBSDP_SOLVE_OPTIMAL, v_cand, v_conf, 30, WORKPREC) == 1,
+          "confirm: exact agreement must be confirmed (even at a high target)");
+
+    /* Case 4: confirming solve is NOT OPTIMAL -> 0 regardless of agreement. */
+    arb_set_str(v_cand, "1.0", WORKPREC);
+    arb_set(v_conf, v_cand);
+    CHECK(arbsdp_adaptive_confirmed(ARBSDP_SOLVE_NUMERICAL, v_cand, v_conf, 2, WORKPREC) == 0,
+          "confirm: a non-OPTIMAL confirming solve must NOT confirm (point-mode stop)");
+
+    arb_clear(v_cand); arb_clear(v_conf);
+    printf("\n  CONFIRM GATE: 4 constructed cases pinned (p68 cross-precision stability).\n");
+}
+
+/* ill_conditioned_3x3 analytic optimum (golden/ill_conditioned_3x3/provenance.json
+ * key "optimal_value", 65 digits): 1 + 10^-6 = 1000001/1000000 exact. */
+#define GOLD_ILL3X3 "1.0000010000000000000000000000000000000000000000000000000000000000"
+
+/* ------------------------------------------------------------------------- *
+ * Test 7: P68 VICTIMS CONFIRMED END-TO-END (bead arb-prec-IPM-p68).             *
+ *                                                                              *
+ * The two goldens that originally exposed p68 -- trivial_2x2 (optimum exactly  *
+ * 1) and ill_conditioned_3x3 (optimum 1+1e-6) -- driven through the full       *
+ * arbsdp_solve_adaptive controller at the CALIBRATED target_digits=12.  Before *
+ * the p68 fix, a prec=128 soft-OPTIMAL snapshot was lifted to OPTIMAL on its    *
+ * status alone, delivering an objective short of 12 digits.  The fix is a       *
+ * cross-precision STABILITY gate: an OPTIMAL fixed solve at precision P is only  *
+ * a CANDIDATE; the next doubling (2P) CONFIRMS it iff that solve is also OPTIMAL *
+ * AND its recovered value agrees with the candidate to >= target_digits; on     *
+ * confirmation the controller RETURNS THE CANDIDATE (final_prec stays at P).     *
+ *                                                                              *
+ * prec_history_len >= 2 is the LOAD-BEARING assertion: it proves a CONFIRMING   *
+ * solve ran after the candidate.  A status-only gate (the pre-p68 bug) would    *
+ * accept the candidate one-shot at len == 1, so this check bites exactly if the *
+ * loop is reverted to status-only.  final_prec <= 256 pins the return-lower     *
+ * behaviour (the controller returns the low candidate precision, no bits/digit  *
+ * regression from over-escalation).                                            *
+ * ------------------------------------------------------------------------- */
+static void
+test_p68_victims_confirmed(void)
+{
+    /* Verify the hardcoded ill_conditioned_3x3 optimum against its provenance
+     * file (CLAUDE.md rule 8: do not trust a transcribed constant). */
+    {
+        char path[1024];
+        FILE *f;
+        snprintf(path, sizeof path,
+                 "%s/ill_conditioned_3x3/provenance.json", GOLDEN_DIR);
+        f = fopen(path, "r");
+        CHECK(f != NULL, "p68: cannot open ill_conditioned_3x3 provenance.json");
+        if (f) {
+            char buf[8192];
+            size_t n = fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = '\0';
+            fclose(f);
+            CHECK(strstr(buf, "\"" GOLD_ILL3X3 "\"") != NULL,
+                  "p68: GOLD_ILL3X3 must match provenance optimal_value verbatim");
+        }
+    }
+
+    struct { const char *name; const char *gold; }
+    victims[2] = {
+        { "trivial_2x2",        GOLD_TRIVIAL },
+        { "ill_conditioned_3x3", GOLD_ILL3X3 },
+    };
+
+    for (int k = 0; k < 2; k++) {
+        arbsdp_problem p;
+        arbsdp_adaptive_result r;
+        arbsdp_precision_params pp;
+        double d;
+
+        if (!load_golden(&p, victims[k].name)) {
+            CHECK(0, "p68: read victim golden");
+            continue;
+        }
+
+        arbsdp_precision_default_params(&pp);
+        pp.prec0         = 128;
+        pp.prec_max      = 1024;   /* ill_conditioned_3x3 provenance prec_cap */
+        pp.target_digits = 12;     /* calibrated target_digits */
+
+        arbsdp_solve_adaptive(&r, &p, &pp);
+        print_trace(victims[k].name, &r, victims[k].gold);
+
+        d = digits_matched(r.res.value, victims[k].gold);
+
+        /* (1) the controller reports OPTIMAL. */
+        CHECK(r.status == ARBSDP_ADAPTIVE_OPTIMAL,
+              "p68: victim must reach ADAPTIVE_OPTIMAL");
+        /* (2) the DELIVERED objective meets the 12-digit target (the accuracy
+         * property p68 is about -- a status-only accept failed this). */
+        CHECK(d >= 12.0,
+              "p68: delivered value must match the optimum to >= 12 digits");
+        /* (3) LOAD-BEARING: the CONFIRMATION path ran (candidate + >=1 confirming
+         * solve).  A status-only gate would accept one-shot at len == 1; this is
+         * the regression guard that bites if the loop reverts to status-only. */
+        CHECK(r.prec_history_len >= 2,
+              "p68: confirmation path must run (prec_history_len >= 2)");
+        /* (4) return-lower: the controller returns the low candidate precision,
+         * no bits/digit regression. */
+        CHECK(r.final_prec <= 256,
+              "p68: controller must return the low candidate precision (<=256)");
+
+        printf("    p68 victim %s: status=%s final_prec=%ld"
+               " prec_history_len=%d digits=%.3f\n",
+               victims[k].name, adaptive_status_name(r.status),
+               (long) r.final_prec, r.prec_history_len, d);
+
+        arbsdp_adaptive_result_clear(&r);
+        arbsdp_problem_clear(&p);
+    }
+}
+
 int
 main(void)
 {
@@ -405,6 +548,8 @@ main(void)
     test_cap_honest_limit();
     test_target_digits_met();
     test_mutation_guards();
+    test_confirm_gate();
+    test_p68_victims_confirmed();
 
     if (failures != 0) {
         fprintf(stderr, "\ntest_precision: %d check(s) FAILED\n", failures);

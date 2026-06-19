@@ -68,9 +68,32 @@
  * of precision (the loop stops the instant the 1e-8 gap is met).  To realise the
  * accuracy the higher precision buys, the adaptive driver TIGHTENS the inner
  * tolerance to match the request:  opt_tol = feas_tol = 10^(-target_digits).
- * The accuracy gate is then BOTH (status == OPTIMAL) AND (achieved error implied
- * by the final mu meets the target); when no precision <= prec_max clears the
- * gate, the honest limit is returned.
+ * (Target/tolerance coupling is UNCHANGED from the prior gate.)
+ *
+ * CROSS-PRECISION STABILITY GATE (bead arb-prec-IPM-p68).  An OPTIMAL solve at
+ * precision P is only a CANDIDATE.  The next-higher-precision (2P) solve is a
+ * CONFIRMING solve.  The candidate is CONFIRMED iff the confirming solve is ALSO
+ * OPTIMAL and its recovered objective value agrees with the candidate's to at
+ * least target_digits relative decimal digits (arbsdp_adaptive_confirmed).  On
+ * confirmation the controller RETURNS THE CANDIDATE: final_prec stays at P and
+ * value/iters/iterate are the candidate's -- the confirming solve is verification
+ * overhead, discarded.  Bits/digit does NOT regress relative to the old gate.
+ * If the confirming solve is itself OPTIMAL but does not agree, it becomes the
+ * new candidate and escalation continues.  If prec_max is reached without a
+ * confirmation, ARBSDP_ADAPTIVE_LIMIT is returned (honest; never a false OPTIMAL).
+ * Edge: prec0 == prec_max means no second precision exists; the gate can only
+ * return ARBSDP_ADAPTIVE_LIMIT.
+ *
+ * HONEST FRAMING (CLAUDE.md rule 1): ARBSDP_ADAPTIVE_OPTIMAL is a POINT-MODE
+ * HEURISTIC stop.  It catches precision-limited inaccuracy and cross-precision
+ * instability (the p68 class: a precision-starved OPTIMAL whose value moves when
+ * precision rises is rejected).  It is NOT a rigorous guarantee of objective
+ * accuracy: two solves that both converge to the same tolerance-limited point and
+ * agree with each other but are both short of the true optimum are not caught
+ * here.  The RIGOROUS objective-accuracy guarantee is Layer 1's certified bracket
+ * width (certify.c, b18/b19), which derives [lb,ub] independently in ball
+ * arithmetic.  A follow-up will gate on the Layer-1 bracket once its lower bound
+ * is tight (bead arb-prec-IPM-oc7).
  *
  * Arb memory discipline (CLAUDE.md rule 7): arbsdp_adaptive_result owns one
  * embedded arbsdp_result (the final solve) and a heap prec_history array; each
@@ -96,7 +119,7 @@ extern "C" {
  * POINT MODE (CLAUDE.md rule 1): NOT the rigorous Layer-1 status (b19).
  */
 typedef enum {
-    ARBSDP_ADAPTIVE_OPTIMAL = 1,  /* a precision <= prec_max met the accuracy target */
+    ARBSDP_ADAPTIVE_OPTIMAL = 1,  /* a candidate OPTIMAL solve was CONFIRMED by the next-higher precision (cross-precision stability, p68) */
     ARBSDP_ADAPTIVE_LIMIT   = 2   /* prec_max reached without meeting target (honest) */
 } arbsdp_adaptive_status;
 
@@ -179,19 +202,30 @@ typedef struct {
  * an uninitialised arbsdp_adaptive_result and must arbsdp_adaptive_result_clear
  * it afterwards regardless of the return value).
  *
- * Policy (MATH_SPEC §6, AUDITION):
+ * Policy (MATH_SPEC §6, AUDITION, bead arb-prec-IPM-p68):
  *   1. tol <- 10^(-target_digits); set inner feas_tol = opt_tol = tol.
+ *      (Target/tolerance coupling is unchanged.)
  *   2. prec <- prec0.  Loop:
  *        - re-solve cleanly at prec (a fresh arbsdp_result init/solve/clear --
  *          no warm-start in v1; see LIMITATION); record a prec_history step.
- *        - if status == OPTIMAL and the achieved accuracy meets target_digits,
- *          keep this result -> ARBSDP_ADAPTIVE_OPTIMAL, done.
- *        - else if prec >= prec_max, keep the best-so-far result ->
+ *        - if status != OPTIMAL, advance prec or return ARBSDP_ADAPTIVE_LIMIT.
+ *        - if status == OPTIMAL and no candidate yet, PROMOTE to candidate at P.
+ *          Escalate prec to 2P (the confirming precision).
+ *        - confirming solve at 2P:
+ *            if OPTIMAL and agrees with candidate to >= target_digits digits
+ *              (arbsdp_adaptive_confirmed): RETURN THE CANDIDATE result
+ *              (final_prec = P, value/iters from the candidate solve) ->
+ *              ARBSDP_ADAPTIVE_OPTIMAL, done.  The confirming solve is discarded.
+ *            if OPTIMAL but does not agree: the confirming solve becomes the new
+ *              candidate; escalate and continue.
+ *            if not OPTIMAL: keep the existing candidate; continue.
+ *        - if prec >= prec_max: return the best-so-far result ->
  *          ARBSDP_ADAPTIVE_LIMIT (honest; never a false OPTIMAL), done.
  *        - else prec <- min(escalation*prec, prec_max) and continue.
- *   The "best-so-far" kept on a LIMIT is the highest-accuracy iterate seen, so
- *   Layer 1 can still certify whatever bound it can (MATH_SPEC §6 graceful
- *   degradation).
+ *   Edge: prec0 == prec_max means no confirming precision exists; the result can
+ *   only be ARBSDP_ADAPTIVE_LIMIT.  The "best-so-far" kept on a LIMIT is the
+ *   best candidate or last iterate seen, so Layer 1 can still certify whatever
+ *   bound it can (MATH_SPEC §6 graceful degradation).
  *
  * Returns the adaptive status (also stored in res->status).
  *
@@ -204,6 +238,28 @@ typedef struct {
 arbsdp_adaptive_status arbsdp_solve_adaptive(arbsdp_adaptive_result *res,
                                              const arbsdp_problem *p,
                                              const arbsdp_precision_params *pp);
+
+/*
+ * arbsdp_adaptive_confirmed -- the CROSS-PRECISION STABILITY gate (bead
+ * arb-prec-IPM-p68).  A candidate OPTIMAL solve at precision P is CONFIRMED by
+ * the next (precision-2P) CONFIRMING solve iff that confirming solve is ALSO
+ * OPTIMAL and its recovered value agrees with the candidate's value to at least
+ * target_digits decimal digits (relative).
+ *
+ * Returns 1 IFF (conf_status == ARBSDP_SOLVE_OPTIMAL) AND the relative agreement
+ * between v_cand and v_conf is >= target_digits digits, where
+ *     agreement = -log10( |v_cand - v_conf| / max(1, |v_cand|) ).
+ * Exact agreement (zero / underflowing-small difference) => +inf => confirmed.
+ *
+ * POINT MODE (CLAUDE.md rule 1): this is a HEURISTIC stop on the approximate
+ * point-mode solve -- a precision-starved OPTIMAL whose recovered value MOVES
+ * when precision rises is rejected (the p68 class).  It is NOT a rigor claim;
+ * all rigor is Layer 1's bracket (certify.c, b18/b19).  `prec` is the working
+ * precision for the internal ball-arithmetic agreement computation.
+ */
+int arbsdp_adaptive_confirmed(arbsdp_solve_status conf_status,
+                              const arb_t v_cand, const arb_t v_conf,
+                              int target_digits, slong prec);
 
 /*
  * arbsdp_adaptive_result_clear -- free everything arbsdp_solve_adaptive

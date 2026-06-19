@@ -874,7 +874,7 @@ in the solve.
     X ~ 1%).  Source: HsdeNtSdpSolver.ts:850-854 (stall detection: `if (muNew > 0.99 * mu) stallCount++`).
 (c) Relative residual floor stops improving.
 
-**Escalation strategy:**
+**Escalation strategy (AUDITION winner: geometric doubling):**
 
     prec <- 2 * prec          (doubling, simple and robust)
     -- or --
@@ -882,16 +882,50 @@ in the solve.
 
 The model-based formula arises from the fact that the Schur condition number
 grows like 1/mu (CLAUDE.md invariant 3), so the required precision to maintain
-accuracy in the Cholesky grows like log2(1/mu) = -log2(mu) bits.
+accuracy in the Cholesky grows like log2(1/mu) = -log2(mu) bits.  The doubling
+strategy was adopted after a measured audition; see the AUDITION banner in
+`c/include/arbsdp/precision.h`.
+
+**Acceptance gate (cross-precision stability, bead arb-prec-IPM-p68):**
+
+An OPTIMAL solve at precision P is a CANDIDATE, not immediately accepted.  The
+next-higher precision (2P) is a CONFIRMING solve.  Acceptance requires:
+
+1. The confirming solve also reaches status OPTIMAL.
+2. Its recovered objective value agrees with the candidate's to at least
+   `target_digits` relative decimal digits
+   (`arbsdp_adaptive_confirmed` in `c/src/precision.c`).
+
+On confirmation, the controller RETURNS THE CANDIDATE result: `final_prec`
+stays at P and the value/iters/iterate are from the candidate solve.  The
+confirming solve is verification overhead and is discarded.  Bits/digit does
+not regress relative to the old single-solve gate.
+
+If the confirming solve is itself OPTIMAL but does not agree, it becomes the
+new candidate and escalation continues.  If `prec_max` is reached without
+confirmation, ARBSDP_ADAPTIVE_LIMIT is returned.  Edge: `prec0 == prec_max`
+means no confirming precision exists; the result can only be LIMIT.
+
+**HONEST FRAMING (CLAUDE.md rule 1):** ARBSDP_ADAPTIVE_OPTIMAL is a
+POINT-MODE HEURISTIC stop.  It catches precision-limited inaccuracy and
+cross-precision instability (the p68 class: a precision-starved OPTIMAL whose
+value moves when precision rises is rejected).  It does NOT guarantee rigorous
+objective accuracy: two solves converging to the same tolerance-limited point
+and agreeing with each other but both short of the true optimum are not caught
+here.  The RIGOROUS objective-accuracy guarantee is Layer 1's certified bracket
+width (`certify.c`, b18/b19), which derives [lb, ub] independently in ball
+arithmetic.  A follow-up will gate on the Layer-1 bracket once its lower bound
+is tight (bead arb-prec-IPM-oc7).
 
 **Caps and graceful degradation:**
 
     prec_max    -- hard cap on working precision (e.g., 4096 bits)
     iter_max    -- hard cap on iterations (DEFAULT_PARAMS: iterLimit = 500)
 
-On hitting either cap, return the best iterate with status "limit" (mapped to
-"inconclusive" in the output object) and let Layer 1 attempt to certify
-whatever bound it can from the current approximate solution.
+On hitting either cap without a confirmed solve, return the best iterate with
+status ARBSDP_ADAPTIVE_LIMIT (mapped to "inconclusive" in the output object)
+and let Layer 1 attempt to certify whatever bound it can from the current
+approximate solution.
 
 **Float64 warm-start (optional):** Run the existing TS solver (or a float64
 inner loop) to generate a starting point, then lift to arb.  This typically

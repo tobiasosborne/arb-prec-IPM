@@ -47,6 +47,29 @@ start Layer-1 work until the Layer-0 approximate solver is correct and performan
   `[lb,ub]`). RIGOR GATE PASS: `lb <= opt <= ub` for 7 tr-bounded goldens; ub tight to
   56–191 digits, lb loose (single-dual). 14/14 ctest normal + ASan. All pushed.
 
+- **p68 DONE (2026-06-19):** the adaptive accuracy-contract bug. The controller's
+  gate was status-only (accept the first `OPTIMAL` at inner tol `10^-target`),
+  which gave NO guarantee the recovered objective met `target_digits`. Replaced
+  with a CROSS-PRECISION STABILITY gate (`arbsdp_adaptive_confirmed`,
+  `c/src/precision.c`): an `OPTIMAL` solve at precision P is a CANDIDATE; the next
+  doubling (2P) CONFIRMS it iff that solve is also `OPTIMAL` and its recovered
+  objective agrees with the candidate to `>= target_digits`. On confirmation the
+  controller RETURNS THE CANDIDATE (final_prec stays at P; the confirming solve is
+  verification overhead) — so `bits/digit` and provenance are UNCHANGED (zero
+  golden churn). De-risk measurement first (rule 3): post-b30 all 16 goldens
+  already deliver `digits >= target` with favorable mu->objective transfer
+  (+0.6..+3.9 digits), so p68 was latent/b30-masked; the obvious `digits_from_mu >=
+  target` gate was measured and REJECTED (it under-estimates accuracy, would
+  over-reject 13/16). TDD: unit `test_confirm_gate` (the p68 discriminator; a
+  status-only revert fails it) + integration `test_p68_victims_confirmed`
+  (trivial_2x2 13.756d, ill_conditioned_3x3 13.744d at td=12, both
+  ADAPTIVE_OPTIMAL, final_prec=128, `prec_history_len>=2` proving confirmation).
+  14/14 ctest normal+ASan, valgrind definitely/indirectly-lost=0. HONEST framing
+  (rule 1): ADAPTIVE_OPTIMAL is a POINT-MODE heuristic, NOT rigorous; the residual
+  tolerance-limited case (both solves agree yet are short of the optimum) is
+  Layer-1's certified-bracket job — follow-up **arb-prec-IPM-wf5** (blocked on
+  oc7). Cost: one confirming solve per problem (warm-start b31 would amortize it).
+
 ## Current state (2026-06-02)
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build

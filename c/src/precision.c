@@ -64,8 +64,10 @@ arbsdp_adaptive_result_clear(arbsdp_adaptive_result *res)
  * measure mu is an upper bound on the duality gap; once mu < 10^-d the objective
  * is accurate to ~d digits.  Reported in prec_history (MATH_SPEC §7.1
  * gap_history).  Returns -log10(mu), or a large sentinel when mu underflows.
- * NOTE: the OPTIMAL accuracy GATE is the tightened-tolerance convergence flag
- * (see solve_meets_target), NOT this midpoint diagnostic (CLAUDE.md rule 1).
+ * NOTE: this is a DIAGNOSTIC only.  The accuracy gate is now
+ * arbsdp_adaptive_confirmed (cross-precision stability, bead arb-prec-IPM-p68):
+ * an OPTIMAL solve is accepted only when the next-higher precision confirms it.
+ * This mu-based digit count is NOT the gate (CLAUDE.md rule 1).
  */
 static double
 achieved_digits_from_mu(const arb_t mu)
@@ -82,27 +84,77 @@ achieved_digits_from_mu(const arb_t mu)
 }
 
 /*
- * The accuracy GATE.  The fixed driver's 6-flag convergence (convergence.c)
- * fires OPTIMAL only when the scaled primal/dual/gap residuals are all below the
- * tolerance we set (10^-target_digits).  An OPTIMAL exit at that tolerance
- * therefore certifies (in point mode) the objective to ~target_digits digits.
- * The gate is thus exactly: the fixed status is OPTIMAL.  We do NOT consult the
- * untrusted midpoint mu for the gate (CLAUDE.md rule 1) -- only for diagnostics.
+ * arbsdp_adaptive_confirmed -- the CROSS-PRECISION STABILITY gate (bead
+ * arb-prec-IPM-p68).  See the contract + doc comment in precision.h.  A
+ * candidate OPTIMAL solve is CONFIRMED iff the next (higher-precision) confirming
+ * solve is ALSO OPTIMAL and its recovered value agrees with the candidate to
+ * >= target_digits relative decimal digits.  The relative-agreement formula
+ * MIRRORS test_precision.c digits_matched:
+ *     err = |v_cand - v_conf|;  rel = max(1, |v_cand|);  d = -log10(mid(err/rel));
+ * a zero / non-finite-small err is exact agreement => +inf => confirmed.
+ *
+ * POINT MODE (CLAUDE.md rule 1): this is a heuristic stop on the approximate
+ * point-mode solve, NOT a rigor claim; rigor is Layer 1's bracket (b18/b19).
+ * A precision-starved OPTIMAL whose value MOVES when precision rises is the p68
+ * class -- here it is rejected (d < target_digits).
  */
-static int
-solve_meets_target(arbsdp_solve_status status)
+int
+arbsdp_adaptive_confirmed(arbsdp_solve_status conf_status,
+                          const arb_t v_cand, const arb_t v_conf,
+                          int target_digits, slong prec)
 {
-    return status == ARBSDP_SOLVE_OPTIMAL;
+    arb_t err, rel, one;
+    double d;
+
+    /* The confirming solve must itself be a clean OPTIMAL (precision.h). */
+    if (conf_status != ARBSDP_SOLVE_OPTIMAL) return 0;
+
+    arb_init(err); arb_init(rel); arb_init(one);
+
+    arb_sub(err, v_cand, v_conf, prec);
+    arb_abs(err, err);
+
+    arb_abs(rel, v_cand);
+    arb_one(one);
+    if (arb_lt(rel, one)) arb_set(rel, one);
+    arb_div(err, err, rel, prec);
+
+    if (arb_is_zero(err) || !arb_is_finite(err)) {
+        d = 1e9;                                /* exact agreement => +inf       */
+    } else {
+        double e = arf_get_d(arb_midref(err), ARF_RND_NEAR);
+        d = (e <= 0.0) ? 1e9 : -log10(e);
+    }
+
+    arb_clear(err); arb_clear(rel); arb_clear(one);
+    return d >= (double) target_digits;
+}
+
+/*
+ * arbsdp_result_swap -- shallow struct swap of two arbsdp_result.  SAFE because
+ * arbsdp_result holds an inline arb_struct value/mu plus an arbsdp_iterate `it`
+ * whose handles point to HEAP, with NO pointer into the struct itself: a shallow
+ * move transfers ownership of every heap allocation intact (no fix-up needed).
+ * Used by arbsdp_solve_adaptive to MOVE a confirming solve into the kept slot
+ * without a deep copy (CLAUDE.md rule 7: ownership moves, never duplicates).
+ */
+static void
+arbsdp_result_swap(arbsdp_result *a, arbsdp_result *b)
+{
+    arbsdp_result t = *a;
+    *a = *b;
+    *b = t;
 }
 
 arbsdp_adaptive_status
 arbsdp_solve_adaptive(arbsdp_adaptive_result *res, const arbsdp_problem *p,
                       const arbsdp_precision_params *pp)
 {
+    arbsdp_result scratch;            /* confirming solves land here (local)   */
     arbsdp_solve_params sp;
     double tol;
-    slong  prec, prec_max, prec0;
-    int    escalation, cap, count, met;
+    slong  prec, prec_max, prec0, p_cand;
+    int    escalation, cap, count, met, have_cand, res_solved;
 
     /* --- params / tolerance coupling (precision.h banner) ----------------- */
     prec0      = pp->prec0      > 0 ? pp->prec0      : 128;
@@ -138,48 +190,109 @@ arbsdp_solve_adaptive(arbsdp_adaptive_result *res, const arbsdp_problem *p,
                                                         sizeof(arbsdp_prec_step));
     res->prec_history_len = 0;
 
-    /* The kept result.  arbsdp_solve INITIALISES the result it is handed (the
-     * caller passes an UNINITIALISED arbsdp_result -- solve.h), so we do NOT
-     * pre-init here.  On each escalation we arbsdp_result_clear the previous
-     * solve before the next arbsdp_solve re-initialises it at the higher prec
-     * (clean re-solve, no warm-start -- precision.h LIMITATION).  This keeps
-     * exactly ONE live arbsdp_result, so there is no growth across re-solves
-     * (CLAUDE.md rule 7).  arbsdp_adaptive_result_clear's final
-     * arbsdp_result_clear is then balanced by the LAST arbsdp_solve's init. */
-    prec  = prec0;
-    count = 0;
-    met   = 0;
+    /* CROSS-PRECISION STABILITY controller (bead arb-prec-IPM-p68).  The old gate
+     * (an OPTIMAL solve at the tightened tolerance) was a POINT-mode heuristic that
+     * accepted a precision-STARVED OPTIMAL whose recovered objective was short of
+     * target_digits (p68: trivial_2x2 stamped OPTIMAL@128 with 6.7/12 digits).  The
+     * fix: an OPTIMAL solve at precision P is only a CANDIDATE; the NEXT (precision-
+     * 2P) solve CONFIRMS it iff that solve is ALSO OPTIMAL and its value agrees with
+     * the candidate to >= target_digits (arbsdp_adaptive_confirmed).  On confirmation
+     * we RETURN THE CANDIDATE (final_prec stays at P_candidate -- the confirming solve
+     * is verification overhead, discarded -- so bits/digit does NOT regress).  This
+     * still certifies NOTHING (CLAUDE.md rule 1); rigor is Layer 1's bracket (b18/b19).
+     *
+     * MEMORY (CLAUDE.md rule 7): res->res is the live CANDIDATE (the single owned
+     * slot at every point); `scratch` holds each confirming solve.  arbsdp_solve
+     * INITIALISES the slot it is handed, so the FIRST solve into res->res / scratch
+     * needs no pre-init.  On a confirming solve we either (a) confirm -> clear
+     * scratch, return the candidate; (b) promote scratch to the new candidate ->
+     * clear the OLD res->res FIRST, then MOVE scratch into res->res (shallow swap;
+     * the swapped-out old slot is already cleared so the swap leaves res->res owning
+     * the new solve and scratch holding the cleared husk we do NOT touch); or (c)
+     * reject scratch -> clear scratch, keep the candidate.  Exactly ONE owned result
+     * lives in res->res at the end; scratch is always cleared or moved, never both. */
+    prec       = prec0;
+    count      = 0;
+    met        = 0;
+    have_cand  = 0;
+    p_cand     = prec0;
+    res_solved = 0;
 
     for (;;) {
         arbsdp_solve_status st;
+        arbsdp_result      *slot;       /* the result this iteration solves into  */
 
-        /* Clear the previous solve before re-solving at the escalated prec; the
-         * first pass has nothing to clear (arbsdp_solve will init). */
-        if (count > 0) {
-            arbsdp_result_clear(&res->res);
-        }
+        /* With no candidate, every solve lands in res->res (it is both the slot we
+         * try AND the best-effort kept result).  arbsdp_solve re-INITIALISES the
+         * slot it is handed WITHOUT freeing prior contents, so a non-first solve
+         * into an already-solved res->res must clear it first or it leaks (CLAUDE.md
+         * rule 7).  Once a candidate exists, confirming solves land in `scratch`
+         * and res->res is left untouched (the kept candidate). */
+        if (!have_cand) {
+            if (res_solved) arbsdp_result_clear(&res->res);
+            slot = &res->res;
+        } else {
+            slot = &scratch;            /* fresh husk: first use raw; reuse is */
+        }                               /* a cleared/freed husk from prior pass */
+        st = arbsdp_solve(slot, p, prec, &sp);
+        if (slot == &res->res) res_solved = 1;
 
-        st = arbsdp_solve(&res->res, p, prec, &sp);
-
-        /* Record the step (MATH_SPEC §7.1 prec_history). */
+        /* Record the step (MATH_SPEC §7.1 prec_history) from whichever slot we
+         * just filled -- the diagnostics (mu, achieved_digits_from_mu) are kept
+         * intact; they are NO LONGER the gate (bead p68). */
         if (res->prec_history_len < cap) {
             arbsdp_prec_step *step = &res->prec_history[res->prec_history_len];
             step->prec   = prec;
             step->status = st;
-            step->mu     = arf_get_d(arb_midref(res->res.mu), ARF_RND_NEAR);
-            step->digits = achieved_digits_from_mu(res->res.mu);
+            step->mu     = arf_get_d(arb_midref(slot->mu), ARF_RND_NEAR);
+            step->digits = achieved_digits_from_mu(slot->mu);
             res->prec_history_len++;
         }
-        res->final_prec = prec;
         count++;
 
-        /* Accuracy gate: OPTIMAL at the tightened tolerance (point-mode). */
-        if (solve_meets_target(st)) {
-            met = 1;
-            break;
+        if (!have_cand) {
+            /* No candidate yet (the very first solve, or every prior solve was
+             * non-OPTIMAL).  An OPTIMAL solve becomes the candidate; otherwise the
+             * solve stays in res->res as the best-effort kept result.  Either way
+             * final_prec advances so an all-NUMERICAL run reports the last prec. */
+            res->final_prec = prec;
+            if (st == ARBSDP_SOLVE_OPTIMAL) {
+                have_cand = 1;
+                p_cand    = prec;
+            }
+        } else {
+            /* We have a candidate (in res->res @ p_cand); `scratch` is the
+             * confirming solve @ prec (= 2*p_cand). */
+            if (arbsdp_adaptive_confirmed(st, res->res.value, scratch.value,
+                                          pp->target_digits, prec)) {
+                /* CONFIRMED: return the candidate (final_prec = p_cand, value/
+                 * iters/iterate all from the candidate solve).  Discard scratch. */
+                arbsdp_result_clear(&scratch);
+                res->final_prec = p_cand;
+                met = 1;
+                break;
+            }
+            if (st == ARBSDP_SOLVE_OPTIMAL) {
+                /* Not confirmed but the confirming solve is itself OPTIMAL: it
+                 * becomes the NEW candidate.  Clear the OLD candidate FIRST, then
+                 * MOVE scratch into res->res via a shallow swap (the swapped-out
+                 * old slot is the just-cleared husk; we leave it in scratch and do
+                 * NOT clear it again -- no double-clear, no leak). */
+                arbsdp_result_clear(&res->res);
+                arbsdp_result_swap(&res->res, &scratch);
+                p_cand          = prec;
+                res->final_prec = prec;
+            } else {
+                /* Confirming solve failed to be OPTIMAL: reject it, keep the
+                 * candidate.  final_prec stays at the candidate (the kept result).
+                 * Clear scratch (its arbsdp_solve init is balanced here). */
+                arbsdp_result_clear(&scratch);
+            }
         }
 
-        /* Hit the cap without meeting the target -> honest LIMIT (rule 5). */
+        /* Hit the cap without a confirmation -> honest LIMIT (CLAUDE.md rule 5).
+         * res->res still holds the best candidate (or last solve if never OPTIMAL)
+         * so Layer 1 can certify whatever bound it can. */
         if (prec >= prec_max) {
             break;
         }

@@ -182,8 +182,17 @@ Working precision `prec` (bits) is **adaptive**, not fixed:
   (b) the duality gap stalls (μ fails to decrease >X% for K iters — mirrors COPT's
       stall counter);
   (c) the relative residual floor stops improving.
-- **Caps:** `prec_max`, `iter_max`; on hitting them, return best iterate with
-  status `inconclusive` and let Layer 1 still try to certify whatever bound it can.
+- **Acceptance gate (cross-precision stability, bead arb-prec-IPM-p68):** an
+  OPTIMAL solve at precision P is a CANDIDATE; the next-higher precision (2P)
+  CONFIRMS it iff that solve is also OPTIMAL and its recovered objective agrees
+  with the candidate's to ≥ `target_digits` relative decimal digits.  On
+  confirmation, the controller returns the CANDIDATE result (lowest
+  confirmed-sufficient precision, not the confirming solve).
+  `ARBSDP_ADAPTIVE_OPTIMAL` is a POINT-MODE heuristic stop, not a rigorous
+  guarantee; rigor is Layer 1's ball-arithmetic bracket (certify.c, b18/b19).
+- **Caps:** `prec_max`, `iter_max`; on hitting them without a confirmed solve,
+  return best iterate with status `inconclusive` / `ARBSDP_ADAPTIVE_LIMIT` and
+  let Layer 1 still try to certify whatever bound it can.
 - Optional **float64 warm-start**: run the existing solver (or a float64 inner
   loop) to get a starting point, then lift to arb — cheap and often halves iters.
 
