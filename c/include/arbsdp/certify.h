@@ -82,6 +82,21 @@ int arbsdp_verified_psd(const arb_mat_t A, slong prec);
 void arbsdp_gershgorin_lower_bound(arb_t out, const arb_mat_t A, slong prec);
 
 /*
+ * arbsdp_gershgorin_upper_bound -- ALWAYS-VALID rigorous UPPER bound on
+ * lambda_max(A) via the Gershgorin disk theorem (1931), the exact MIRROR of
+ * arbsdp_gershgorin_lower_bound:
+ *
+ *     out >= lambda_max(A),   out = max_i ( ubound(A_ii) + sum_{j!=i} ubound(|A_ij|) ).
+ *
+ * Diagonal entries are taken at their UPPER endpoint and off-diagonal magnitudes
+ * at their UPPER endpoint (arb_get_ubound_arf), and the arithmetic rounds
+ * conservatively (up), so `out` is a guaranteed upper bound for the true matrix
+ * enclosed by the balls.  Valid for ANY symmetric A (no definiteness assumption).
+ * A is square (asserted); `out` must be initialized.
+ */
+void arbsdp_gershgorin_upper_bound(arb_t out, const arb_mat_t A, slong prec);
+
+/*
  * arbsdp_lambda_min_lower_bound -- rigorous lower bound d on lambda_min(A) via
  * the verified-Cholesky shift + bisection (MATH_SPEC §5.3 / §5.3.1).
  *
@@ -331,8 +346,10 @@ int arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
  * finiteness subset; the gap <= tol "optimal" refinement is Layer-2).
  */
 typedef enum {
-    ARBSDP_CERTIFY_OPTIMAL_BRACKET = 1, /* both lb, ub finite: a rigorous bracket  */
-    ARBSDP_CERTIFY_INCONCLUSIVE    = 2  /* lb=-inf or ub=+inf, or tau unhealthy     */
+    ARBSDP_CERTIFY_OPTIMAL_BRACKET   = 1, /* both lb, ub finite: a rigorous bracket  */
+    ARBSDP_CERTIFY_INCONCLUSIVE      = 2, /* lb=-inf or ub=+inf, or tau unhealthy     */
+    ARBSDP_CERTIFY_PRIMAL_INFEASIBLE = 3, /* (b20) rigorous Farkas dual improving ray verified */
+    ARBSDP_CERTIFY_DUAL_INFEASIBLE   = 4  /* (b20) rigorous primal recession ray verified       */
 } arbsdp_certify_status;
 
 /*
@@ -368,6 +385,95 @@ arbsdp_certify_status arbsdp_certify_bracket(arb_t lb, arb_t ub,
                                              const arbsdp_iterate *it,
                                              const arbsdp_apriori *ab,
                                              slong prec_c);
+
+/* ==========================================================================
+ * Rigorous Farkas infeasibility certificates (bead arb-prec-IPM-b20)
+ * ==========================================================================
+ * When the HSDE solve drives tau -> 0 (it->tau < TAU_HEALTHY), the iterate is on
+ * the infeasibility path: (tau, kappa) carry an infeasibility certificate, not an
+ * approximate optimum (CLAUDE.md invariant 8).  The status must then be a VERIFIED
+ * Farkas certificate checked in BALL arithmetic (CLAUDE.md rule 2, invariant 8),
+ * never a float64 heuristic.  Everything below runs in Arb *ball* arithmetic at the
+ * certification precision and produces THEOREMS; the only rigor source is the same
+ * verified-Cholesky / directed-endpoint machinery used for the bracket.
+ *
+ * MATH_SPEC §5.7 (the unified infeasibility path: §5.7.1 primal, §5.7.2 dual,
+ * §5.7.3 the top-level certifier).  References:
+ *   - Jansson-Chaykin-Keil 2007, SIAM J. Numer. Anal. 46(1):180-200, §5
+ *     eq (5.1) / (5.3): the rigorous infeasibility (Farkas) tests for SDP.
+ *   - Jansson 2009 ("On verified numerical computations in convex programming",
+ *     Japan J. Indust. Appl. Math. 26:337-363) Prop 3.1 / 3.2: the verified
+ *     primal/dual infeasibility certificates.
+ *   - Rump, BIT 2006, 46:433-452: verified definiteness underlying the NSD test.
+ *   - Gershgorin 1931: the always-valid lambda_max bound used by the NSD test.
+ */
+
+/*
+ * arbsdp_verify_primal_infeasible -- rigorous primal-infeasibility (Farkas)
+ * verifier (MATH_SPEC §5.7.1; JCK 2007 §5 eq 5.3, Jansson 2009 Prop 3.1).
+ *
+ * Returns 1 IFF it PROVES the primal max <C,X> is infeasible: with the dual
+ * improving ray formed from the RAW iterate dual y (it->y, NO tau-purify, NO
+ * negate) and the FILE-sign constraint data,
+ *     D^b = sum_i (it->y)_i A_i^b      (b = 0 .. it->nblocks-1)
+ * is NEGATIVE SEMIDEFINITE for EVERY block (rigorous lambda_max upper bound <= 0,
+ * inclusive) AND b^T (it->y) > 0 (rigorous LOWER endpoint > 0, strict).  Such a y
+ * is a Farkas certificate: it exhibits a dual improving ray, so no primal-feasible
+ * X exists.  Returns 0 otherwise (not provable / wrong sign / the general case) --
+ * an honest "not certified" (CLAUDE.md rule 2/5), never a false positive.
+ *
+ * Reads it->y, it->prob (== p), it->nblocks.  prec is the certification precision.
+ * p, it non-NULL.
+ */
+int arbsdp_verify_primal_infeasible(const arbsdp_problem *p,
+                                    const arbsdp_iterate *it, slong prec);
+
+/*
+ * arbsdp_verify_dual_infeasible -- rigorous dual-infeasibility (primal-unbounded)
+ * verifier (MATH_SPEC §5.7.2; JCK 2007 §5 eq 5.1, Jansson 2009 Prop 3.2), the
+ * EXACT rank-1 coordinate-ray subclass.
+ *
+ * Returns 1 IFF there is a block b and a coordinate k with (A_i^b)_{kk} EXACTLY
+ * zero (arb_is_zero, zero radius) for ALL constraints i AND (C_file^b)_{kk} > 0
+ * (rigorous LOWER endpoint > 0) -- then X_hat = E_kk (the rank-1 coordinate
+ * outer product) is a rigorously verified primal recession ray: PSD by
+ * construction, <A_i, X_hat> = 0 for every i (feasible direction), and
+ * <C_file, X_hat> > 0 (unbounded improvement), so the primal is unbounded / the
+ * dual infeasible.  The candidate k is chosen POINT-MODE as argmax_k it->X[b][k][k]
+ * but ALL (b,k) pairs are scanned, so the result does not depend on the heuristic.
+ *
+ * Returns 0 for non-coordinate / higher-rank recession rays (an honest
+ * INCONCLUSIVE; see MATH_SPEC §5.7.2 SCOPE), never a false positive.
+ *
+ * Reads it->X, it->prob (== p), it->nblocks.  prec is the certification precision.
+ * p, it non-NULL.
+ */
+int arbsdp_verify_dual_infeasible(const arbsdp_problem *p,
+                                  const arbsdp_iterate *it, slong prec);
+
+/*
+ * arbsdp_certify -- the top-level unified certifier (MATH_SPEC §5.7.3): the single
+ * entry point that dispatches on the HSDE tau between the optimal-bracket path and
+ * the infeasibility (Farkas) path.
+ *
+ * If it->tau >= TAU_HEALTHY (a usable approximate optimum): delegates to
+ * arbsdp_certify_bracket, which fills lb, ub and returns OPTIMAL_BRACKET or
+ * INCONCLUSIVE.
+ *
+ * Else (the infeasibility path, it->tau < TAU_HEALTHY): tries the primal Farkas
+ * test FIRST (arbsdp_verify_primal_infeasible) then the dual
+ * (arbsdp_verify_dual_infeasible), returning PRIMAL_INFEASIBLE / DUAL_INFEASIBLE
+ * on the first that PROVES its certificate; if neither does, returns INCONCLUSIVE.
+ *
+ * lb, ub are caller-init'd; on ANY non-OPTIMAL_BRACKET return they are set to
+ * -inf / +inf (an infeasibility verdict has no finite bracket -- CLAUDE.md rule 2).
+ *
+ * Memory (CLAUDE.md rule 7): lb, ub caller-owned; scratch scoped here.  p, it, ab
+ * non-NULL.  prec_c is the certification precision (final_prec + 128; MATH_SPEC §10).
+ */
+arbsdp_certify_status arbsdp_certify(arb_t lb, arb_t ub, const arbsdp_problem *p,
+                                     const arbsdp_iterate *it,
+                                     const arbsdp_apriori *ab, slong prec_c);
 
 #ifdef __cplusplus
 }

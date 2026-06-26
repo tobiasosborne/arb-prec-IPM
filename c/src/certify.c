@@ -142,6 +142,81 @@ arbsdp_gershgorin_lower_bound(arb_t out, const arb_mat_t A, slong prec)
 }
 
 /* ---------------------------------------------------------------------------
+ * arbsdp_gershgorin_upper_bound
+ *
+ * Gershgorin disk theorem (1931), the exact MIRROR of the lower bound above:
+ * every eigenvalue lies in some disk |z - A_ii| <= R_i, R_i = sum_{j!=i} |A_ij|,
+ * hence lambda_max(A) <= max_i ( A_ii + R_i ).  For a rigorous UPPER bound on the
+ * true matrix enclosed by the input balls we take the diagonal at its UPPER
+ * endpoint, each off-diagonal magnitude at its UPPER endpoint, and round the
+ * arithmetic conservatively UPWARD (arf directed rounding): the result is a proven
+ * upper bound regardless of where the truth sits inside the balls.
+ *
+ * As with the lower bound, A need NOT be symmetric (we form |A_ij| per off-diagonal
+ * entry); the certify use case passes a symmetrized matrix, but Gershgorin is valid
+ * for any matrix with real spectrum and we keep it self-contained.
+ * ------------------------------------------------------------------------- */
+void
+arbsdp_gershgorin_upper_bound(arb_t out, const arb_mat_t A, slong prec)
+{
+    slong n = arb_mat_nrows(A);
+    arf_t best;       /* running max over rows */
+    arf_t diag_hi;    /* ubound(A_ii) */
+    arf_t absu;       /* ubound(|A_ij|) */
+    arf_t row_sum;    /* sum_{j!=i} ubound(|A_ij|), rounded UP (overestimate) */
+    arf_t row_ub;     /* diag_hi + row_sum, rounded UP */
+    arb_t tmp;        /* scratch for |A_ij| */
+    int first = 1;
+
+    assert(arb_mat_nrows(A) == arb_mat_ncols(A) && "gershgorin_upper: A must be square");
+
+    arf_init(best);
+    arf_init(diag_hi);
+    arf_init(absu);
+    arf_init(row_sum);
+    arf_init(row_ub);
+    arb_init(tmp);
+
+    for (slong i = 0; i < n; i++) {
+        /* sum of off-diagonal magnitudes in row i, each at its UPPER endpoint,
+         * accumulated with CEIL rounding so the added radius is never
+         * underestimated. */
+        arf_zero(row_sum);
+        for (slong j = 0; j < n; j++) {
+            if (j == i)
+                continue;
+            arb_abs(tmp, arb_mat_entry(A, i, j));
+            arb_get_ubound_arf(absu, tmp, prec);                 /* >= |A_ij| */
+            arf_add(row_sum, row_sum, absu, prec, ARF_RND_CEIL); /* overestimate */
+        }
+
+        /* diagonal at its UPPER endpoint (overestimate the center). */
+        arb_get_ubound_arf(diag_hi, arb_mat_entry(A, i, i), prec);
+
+        /* row_ub = diag_hi + row_sum, rounded UP (CEIL) -> true upper bound. */
+        arf_add(row_ub, diag_hi, row_sum, prec, ARF_RND_CEIL);
+
+        if (first) {
+            arf_set(best, row_ub);
+            first = 0;
+        } else {
+            arf_max(best, best, row_ub);
+        }
+    }
+
+    /* `best` is a proven upper bound on lambda_max(A); store it as an exact arb
+     * point (zero radius) -- its value already satisfies best >= lambda_max. */
+    arb_set_arf(out, best);
+
+    arf_clear(best);
+    arf_clear(diag_hi);
+    arf_clear(absu);
+    arf_clear(row_sum);
+    arf_clear(row_ub);
+    arb_clear(tmp);
+}
+
+/* ---------------------------------------------------------------------------
  * shift_mat -- B <- symmetrize(A) - s*I, with s subtracted at its UPPER endpoint.
  *
  * Subtracting upper(s) (not s itself) keeps the rigor one-directional: if
@@ -1148,4 +1223,242 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
         _arb_vec_clear(y_ext, m);
 
     return status;
+}
+
+/* ===========================================================================
+ * Rigorous Farkas infeasibility certificates (bead arb-prec-IPM-b20).
+ * MATH_SPEC §5.7; JCK 2007 §5 eq (5.1)/(5.3); Jansson 2009 Prop 3.1/3.2.
+ *
+ * All BALL arithmetic (CLAUDE.md rule 1, invariant 2/8): an infeasibility verdict
+ * must be a VERIFIED Farkas certificate, never a float64 heuristic.  The real
+ * implementations land in a later b20 step; the declarations + stubs here let the
+ * library link and a red TDD test be written against the API.
+ * ======================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_verify_primal_infeasible -- certify.h contract (MATH_SPEC §5.7.1).
+ * ------------------------------------------------------------------------- */
+int
+arbsdp_verify_primal_infeasible(const arbsdp_problem *p, const arbsdp_iterate *it,
+                                slong prec)
+{
+    /* MATH_SPEC §5.7.1; JCK 2007 §5 eq. (5.3); Jansson 2009 Prop. 3.1.  A dual
+     * improving ray y with D^b = sum_i y_i A_i^b <= 0 (NSD, all blocks) AND
+     * b^T y > 0 PROVES the primal infeasible: any feasible X >= 0 yields
+     * 0 >= <D,X> = sum_i y_i <A_i,X> = b^T y > 0, a contradiction.  The witness
+     * y is the firing iterate's RAW dual (it->y, lifted to balls) -- NO tau-purify,
+     * NO negate (the iterate sign already gives sum_i y_i A_i^b ~ -S^b <= 0 as
+     * tau -> 0).  All BALL arithmetic; the only rigor source is verified-Cholesky /
+     * Gershgorin directed endpoints (CLAUDE.md rule 1/2, invariant 8). */
+    int nb;
+    int all_nsd = 1;
+
+    assert(p != NULL && it != NULL && "verify_primal_infeasible: p, it non-NULL");
+
+    nb = p->nblocks;
+
+    /* (1) D^b = sum_i (it->y)_i A_i^b for every block (file-sign A_i, RAW y), in
+     * ball arithmetic via arbsdp_apply_At into a scratch array of nb arb_mat. */
+    if (nb > 0) {
+        arb_mat_t *D = flint_malloc((size_t) nb * sizeof *D);
+        arb_t g;          /* Gershgorin upper bound on lambda_max(D^b)        */
+        arb_t c;          /* verified-Cholesky-shift upper bound, the fallback */
+        arf_t ub_g;       /* ubound(g) */
+        arf_t ub_c;       /* ubound(c) */
+
+        for (int b = 0; b < nb; b++)
+            arb_mat_init(D[b], it->block_n[b], it->block_n[b]);
+        arbsdp_apply_At(D, p, it->y, prec);
+
+        arb_init(g);
+        arb_init(c);
+        arf_init(ub_g);
+        arf_init(ub_c);
+
+        /* (2) NSD test per block: lambda_max(D^b) <= 0 (INCLUSIVE -- the singular
+         * boundary witness has lambda_max EXACTLY 0).  Two independent rigorous
+         * upper bounds; the block passes iff EITHER is <= 0 at its UPPER endpoint
+         * (this is min(g,c) <= 0, MATH_SPEC §5.7.1).  Gershgorin handles the
+         * structured/diagonal singular case (exact 0); the Cholesky shift handles
+         * the strictly-ND interior case.  C's || short-circuits: c is computed
+         * only when g fails.  ALL blocks must pass; stop early on the first
+         * failure (cleanup below is uniform -- no leak). */
+        for (int b = 0; b < nb; b++) {
+            int pass;
+            arbsdp_gershgorin_upper_bound(g, D[b], prec);
+            arb_get_ubound_arf(ub_g, g, prec);
+            pass = (arf_sgn(ub_g) <= 0);
+            if (!pass) {
+                arbsdp_lambda_max_upper_bound(c, D[b], prec);
+                arb_get_ubound_arf(ub_c, c, prec);
+                pass = (arf_sgn(ub_c) <= 0);
+            }
+            if (!pass) {
+                all_nsd = 0;
+                break;
+            }
+        }
+
+        arf_clear(ub_g);
+        arf_clear(ub_c);
+        arb_clear(g);
+        arb_clear(c);
+        for (int b = 0; b < nb; b++)
+            arb_mat_clear(D[b]);
+        flint_free(D);
+    }
+    /* nb == 0: the NSD condition is VACUOUSLY true -> result is (lbound(beta) > 0). */
+
+    if (!all_nsd)
+        return 0;
+
+    /* (3) Positivity: beta = b^T (it->y) in ball arithmetic (assemble_bty mirrors
+     * the §5.4 b^T y_ext assembly via arb_dot, here with the RAW it->y).  The test
+     * is STRICT at the LOWER endpoint: lbound(beta) > 0.  m == 0 -> beta = 0 ->
+     * lbound 0 -> not > 0 -> returns 0 (no false certificate). */
+    {
+        arb_t beta;
+        arf_t lb_beta;
+        int beta_pos;
+
+        arb_init(beta);
+        arf_init(lb_beta);
+        assemble_bty(beta, p, it->y, prec);
+        arb_get_lbound_arf(lb_beta, beta, prec);
+        beta_pos = (arf_sgn(lb_beta) > 0);
+        arf_clear(lb_beta);
+        arb_clear(beta);
+
+        return beta_pos;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_verify_dual_infeasible -- certify.h contract (MATH_SPEC §5.7.2).
+ * ------------------------------------------------------------------------- */
+int
+arbsdp_verify_dual_infeasible(const arbsdp_problem *p, const arbsdp_iterate *it,
+                              slong prec)
+{
+    /* MATH_SPEC §5.7.2; JCK 2007 §5 eq. (5.1); Jansson 2009 Prop. 3.2.  The EXACT
+     * rank-1 COORDINATE recession-ray subclass.  A coordinate k on a block b with
+     *     (A_i^b)_{kk} = 0  EXACTLY for every constraint i = 1..m   AND
+     *     (C_file^b)_{kk} > 0
+     * makes X_hat = E_kk (the k-th coordinate outer product e_k e_k^T) a rigorously
+     * verified primal recession ray: X_hat >= 0 by CONSTRUCTION (rank-1 PSD -- NO
+     * Cholesky, so it works at the PSD boundary, project invariant 1), <A_i,X_hat>
+     * = (A_i^b)_{kk} = 0 for every i (a feasible direction, no constraint moved),
+     * and <C,X_hat> = (C_file^b)_{kk} > 0 (unbounded improvement).  Such a primal
+     * improving ray PROVES the primal unbounded == the dual infeasible (JCK eq 5.1).
+     *
+     * The point-mode DIRECTION hint is k = argmax_k it->X[b][k][k], but we scan ALL
+     * (b,k) pairs: the certificate is a property of the problem DATA, iterate-
+     * independent, so the verdict is robust to a poor solve / a bad heuristic k.
+     *
+     * SCOPE (CONSERVATIVE -- a wrong ACCEPT is a P0, prefer rejecting; a 0 is an
+     * honest INCONCLUSIVE, never a false positive): only the EXACT axis-aligned
+     * rank-1 case.  Non-coordinate rank-1 rays (v^T A_i v = 0 for a non-coordinate
+     * v) and higher-rank rays need verified-linear-solve / Krawczyk machinery
+     * (bead b24) -- out of scope here.
+     *
+     * EXACTNESS (CLAUDE.md rule 2/8): "(A_i^b)_{kk} = 0" is tested with arb_is_zero
+     * on the MATERIALIZED problem data -- a zero-RADIUS exact 0 (the same exact-ball
+     * idiom as the oc7 detector), never a tolerance.  "(C_file^b)_{kk} > 0" is the
+     * rigorous LOWER endpoint strictly positive (arf_sgn(lbound) > 0). */
+    int nb;
+
+    assert(p != NULL && it != NULL && "verify_dual_infeasible: p, it non-NULL");
+
+    nb = it->nblocks;
+    if (nb <= 0)
+        return 0;
+
+    for (int b = 0; b < nb; b++) {
+        slong       n = it->block_n[b];
+        int        *zero_ok;   /* zero_ok[k] = 1 while (A_i)_{kk} == 0 for all seen i */
+        arb_mat_t   M;         /* scratch: materialized A_i^b, then C_file^b          */
+        arf_t       lo;        /* lbound((C_file^b)_{kk})                             */
+        int         hit = 0;
+
+        if (n <= 0)
+            continue;          /* empty block: no coordinate to test                  */
+
+        zero_ok = flint_malloc((size_t) n * sizeof *zero_ok);
+        for (slong k = 0; k < n; k++)
+            zero_ok[k] = 1;    /* m == 0: every k stays a candidate (decided by C below) */
+
+        arb_mat_init(M, n, n);
+
+        /* (a) any constraint i with a nonzero EXACT diagonal at k kills coordinate k:
+         * X_hat = E_kk would move <A_i,X_hat> = (A_i^b)_{kk} != 0 (not a feasible
+         * direction).  Materialize each A_i^b once and sweep its diagonal. */
+        for (int i = 1; i <= it->m; i++) {
+            arbsdp_problem_block_mat(M, p, /*matno=*/i, /*block=*/b, prec); /* A_i^b */
+            for (slong k = 0; k < n; k++)
+                if (zero_ok[k] && !arb_is_zero(arb_mat_entry(M, k, k)))
+                    zero_ok[k] = 0;
+        }
+
+        /* (b) among the survivors, a strictly positive C_file^b diagonal is the
+         * unbounded-improvement witness -> dual infeasible.  Reuse M for C_file^b. */
+        arf_init(lo);
+        arbsdp_problem_block_mat(M, p, /*matno=*/0, /*block=*/b, prec);     /* C_file^b */
+        for (slong k = 0; k < n; k++) {
+            if (!zero_ok[k])
+                continue;
+            arb_get_lbound_arf(lo, arb_mat_entry(M, k, k), prec);
+            if (arf_sgn(lo) > 0) {   /* (C_file^b)_{kk} > 0, rigorous lower endpoint */
+                hit = 1;
+                break;
+            }
+        }
+
+        arf_clear(lo);
+        arb_mat_clear(M);
+        flint_free(zero_ok);
+
+        if (hit)
+            return 1;
+    }
+
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_certify -- the top-level unified certifier (MATH_SPEC §5.7.3).
+ *
+ * INFEASIBILITY-FIRST dispatch (NOT tau-gated).  The two verify_* routines are
+ * RIGOROUS and CONSERVATIVE: a returned 1 is a COMPLETE Farkas proof, and the
+ * Farkas alternative is EXCLUSIVE of feasibility, so neither can misfire on a
+ * feasible problem (CLAUDE.md rule 2).  That makes it both safe AND necessary to
+ * try them BEFORE the bracket path regardless of tau: a tau-gated dispatch (the
+ * earlier design) would never reach the dual verifier for a golden like
+ * dual_infeasible_diag, whose firing iterate settles at tau ~ 4.1e-4, ABOVE
+ * ARBSDP_CERTIFY_TAU_HEALTHY (1e-6) -- so the tau guard would route it to the
+ * bracket path and the infeasibility would go uncertified.
+ *
+ * ORDER (MATH_SPEC §5.7.3): PRIMAL first, then DUAL.  A both-infeasible problem
+ * (e.g. primal_infeasible_psd has BOTH a dual improving ray AND a coordinate
+ * recession ray) is reported PRIMAL_INFEASIBLE by convention.  An infeasibility
+ * verdict has no finite bracket, so lb/ub are set to [-inf, +inf] (CLAUDE.md
+ * rule 2).  Only when NEITHER Farkas certificate is proved do we fall through to
+ * arbsdp_certify_bracket (which applies its own tau guard internally).
+ * ------------------------------------------------------------------------- */
+arbsdp_certify_status
+arbsdp_certify(arb_t lb, arb_t ub, const arbsdp_problem *p,
+               const arbsdp_iterate *it, const arbsdp_apriori *ab, slong prec_c)
+{
+    assert(p != NULL && it != NULL && ab != NULL && "certify: p, it, ab non-NULL");
+
+    if (arbsdp_verify_primal_infeasible(p, it, prec_c)) {
+        arb_neg_inf(lb);
+        arb_pos_inf(ub);
+        return ARBSDP_CERTIFY_PRIMAL_INFEASIBLE;
+    }
+    if (arbsdp_verify_dual_infeasible(p, it, prec_c)) {
+        arb_neg_inf(lb);
+        arb_pos_inf(ub);
+        return ARBSDP_CERTIFY_DUAL_INFEASIBLE;
+    }
+    return arbsdp_certify_bracket(lb, ub, p, it, ab, prec_c);
 }

@@ -254,6 +254,29 @@ target_link_libraries(test_infeasible PRIVATE arbsdp)
 
 add_test(NAME test_infeasible COMMAND test_infeasible)
 
+# The rigorous Farkas infeasibility certificate gate (bead arb-prec-IPM-b20):
+# exercises arbsdp_verify_primal_infeasible / arbsdp_verify_dual_infeasible and the
+# unified arbsdp_certify dispatcher against the 6 infeasible/unbounded goldens plus
+# a feasible no-misfire case.  Hardcodes golden names (no golden_provenance.h);
+# passes an absolute GOLDEN_DIR like test_infeasible.  Links libm for tau_mid_d's
+# arf_get_d diagnostic (no log10, but keep m for parity with the other golden tests).
+add_executable(test_farkas test/test_farkas.c)
+
+target_include_directories(test_farkas
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_farkas
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+target_link_libraries(test_farkas PRIVATE arbsdp m)
+
+add_test(NAME test_farkas COMMAND test_farkas)
+
 add_executable(test_precision test/test_precision.c)
 
 target_include_directories(test_precision

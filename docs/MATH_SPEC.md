@@ -934,13 +934,171 @@ trace-mirror). Jansson 2009, Japan J. Indust. Appl. Math. 26:337-363, Thm 4.2
     "optimal"            if ub - lb <= tol and both finite
     "primal_infeasible"  if HSDE (tau, kappa) certificate verifies in ball arithmetic
                          (verified Farkas: ||r_d|| enclosure <= rel * b^T y, tau->0, kappa>0)
+                         (rigorous verification: §5.7, bead b20)
     "dual_infeasible"    if HSDE (tau, kappa) certificate verifies dually
                          (<C, X> enclosure negative, ||r_p|| enclosure <= rel * |<C, X>|)
+                         (rigorous verification: §5.7, bead b20)
     "inconclusive"       gap too wide, or bounds infinite -> escalate to Layer 2 or
                          bump precision and re-solve
 
 The infeasibility certificates are checked in BALL arithmetic -- NOT float64
 heuristics (CLAUDE.md invariant 8).
+
+### 5.7 Rigorous Farkas infeasibility certificates (bead arb-prec-IPM-b20)
+
+**OVERVIEW.**  The HSDE carries infeasibility in (tau, kappa): as tau -> 0 with
+kappa > 0 the iterate carries a Farkas certificate (Andersen-Roos-Terlaky 2003).
+The point-mode detection in convergence.c (§3.8.1, epic.2) only STEERS the loop;
+§5.7 is the RIGOROUS ball-arithmetic verification (the user-facing certified
+status, CLAUDE.md invariant 8).  Both certificates are derived from the firing
+iterate's RAW variables; unlike the optimal bracket (§5.4/§5.5) they do NOT
+tau-purify or negate y.  All checks run in Arb ball arithmetic and produce
+THEOREMS; the only rigor sources are (a) rigorous lambda_max upper bounds
+(Gershgorin + verified-Cholesky shift, never eigendecomposition -- CLAUDE
+invariant 2) and (b) PSD-by-construction rank-1 outer products (no Cholesky --
+works at the cone boundary, invariant 1).
+
+#### 5.7.1 Primal infeasibility (Farkas dual improving ray)
+
+**Theorem (JCK 2007 §5 eq. (5.3); Jansson 2009 Prop. 3.1).**  If there exists
+y in R^m with
+
+    D^b  :=  sum_i y_i A_i^b  <=  0    (negative semidefinite, for all blocks b)
+    b^T y  >  0,
+
+then the primal max <C,X> s.t. <A_i,X>=b_i, X>=0 is INFEASIBLE.  Proof: any
+feasible X >= 0 gives 0 >= <D,X> = sum_i y_i <A_i,X> = sum_i y_i b_i = b^T y
+> 0, contradiction.
+
+**Rigorous verification recipe.**  Take y = the firing iterate's RAW y (it->y,
+lifted to balls; NO purify/negate -- sign pinned from iterate.c:
+R_d^b = sum_i y_i A_i^b + S^b - C_int^b * tau, so as tau -> 0 with ||R_d||
+small, sum_i y_i A_i^b ~ -S^b <= 0; and dObj = b^T y > 0).  Form
+
+    D^b  =  sum_i y_i A_i^b
+
+in ball arithmetic (file-sign A_i, the arbsdp_apply_At convention).  For each
+block compute a rigorous UPPER bound on lambda_max(D^b):
+
+    dup_b  =  min( gershgorin_upper(D^b),  lambda_max_cholesky_upper(D^b) )
+
+where
+
+    gershgorin_upper(A)  =  max_i ( ubound(A_ii) + sum_{j!=i} ubound(|A_ij|) )
+
+(Gershgorin disc theorem, rigorous upper bound on every eigenvalue; the
+structurally-zero rows of D give an EXACT 0) and
+
+    lambda_max_cholesky_upper(A)  =  -lambda_min_lower_bound(-A)
+
+(verified-Cholesky shift, §5.3/§5.5; tight for strictly-ND interior witnesses).
+Both are rigorous upper bounds, so their min is the tightest.  The NSD test is
+
+    dup_b  <=  0
+
+(INCLUSIVE: equality is a valid certificate -- the boundary lambda_max=0 case).
+Then compute beta = b^T y with arb_dot and take its LOWER endpoint; the
+positivity test is
+
+    lbound(beta)  >  0    (STRICT).
+
+If all blocks pass dup_b <= 0 AND lbound(beta) > 0: PRIMAL INFEASIBLE is PROVEN.
+
+**NSD-test-must-be-inclusive note.**  The golden primal_infeasible_psd has the
+singular witness D = y_1 * E_11 = diag(neg, 0) whose lambda_max is EXACTLY 0
+(the unconstrained X_22 direction).  Gershgorin's row-2 sum is exactly zero
+(zero radius), giving dup = 0.000e+00 rigorously; a strict dup_b < 0 test would
+wrongly reject it.  The verified-Cholesky shift alone CANNOT certify a singular
+NSD matrix (cho of -D - sI fails at s=0); Gershgorin handles the
+structured/diagonal singular case, the Cholesky shift handles the strictly-ND
+interior case (primal_infeasible_minor: both gave dup = -5.379e-01).  Keep BOTH
+and take the min.
+
+#### 5.7.2 Dual infeasibility / primal unbounded (primal improving ray)
+
+**Theorem (JCK 2007 §5 eq. (5.1); Jansson 2009 Prop. 3.2).**  If there exists
+X >= 0 with <A_i,X> = 0 for all i and <C,X> > 0, then the dual is INFEASIBLE
+(equivalently the primal max is UNBOUNDED above).  Adding t*X to any feasible
+point stays feasible for all t >= 0 and increases the objective without bound.
+
+**The rigorous obstacle (Rump 2006).**  The recession ray X is on the PSD
+boundary (rank-deficient), and the constraints <A_i,X> = 0 are EXACT equalities;
+with an approximate X both "X >= 0" (verifying PSD of a singular matrix is
+ill-posed, Rump 2006) and "<A_i,X> = 0 exactly" (a ball enclosing 0 is not a
+proof of 0) are not rigorously checkable in general.
+
+**Rigorous verification recipe (EXACT rank-1 coordinate ray -- conservative
+subclass).**  Look for a block b and coordinate k such that (A_i^b)_{kk} is
+EXACTLY zero (arb_is_zero on the materialized problem data -- a zero-radius exact
+0) for ALL i = 1..m, AND (C_file^b)_{kk} > 0 (lower endpoint > 0).  Then
+
+    X_hat  =  E_kk^(b)    (the rank-1 outer product e_k e_k^T placed on block b)
+
+is:
+- PSD by construction (rank-1 outer product; NO Cholesky, works at the boundary,
+  invariant 1);
+- <A_i, X_hat> = (A_i^b)_{kk} = 0 EXACTLY for all i (the only entry of E_kk
+  that the Frobenius inner product reads is (k,k), and it is a structural zero
+  of the problem data);
+- <C, X_hat> = (C_file^b)_{kk} > 0 (rigorous lower endpoint).
+
+So X_hat is an exact, rigorously-verified recession ray: DUAL INFEASIBLE is
+PROVEN.  The candidate coordinate is chosen point-mode as
+
+    k  =  argmax_k  it->X[b][k][k]
+
+(a DIRECTION hint only, never a rigor dependency); the implementation also
+brute-force scans all (b,k) for robustness (the cert is iterate-independent --
+it is a property of the problem data).
+
+**SCOPE / honest INCONCLUSIVE.**  This certifies only AXIS-ALIGNED rank-1
+recession rays.  A general rank-1 ray v v^T with v not a coordinate vector needs
+v^T A_i v = 0 for approximate v, which is not exactly checkable; a higher-rank
+ray needs a verified PSD enclosure.  Both are out of scope for b20 and return
+INCONCLUSIVE honestly (follow-up: a verified-linear-solve / Krawczyk ray,
+requires the Layer-2 machinery of bead b24; file as a new bead).  For the v1
+target problems (LP-as-diagonal blocks, density/trace-normalized SDPs) the
+recession rays are coordinate-aligned.
+
+#### 5.7.3 Dispatch and simultaneous infeasibility
+
+The top-level certifier, when tau < TAU_HEALTHY (1e-6; the optimal-bracket path
+is §5.4/§5.5), tries the PRIMAL Farkas cert FIRST, then the DUAL cert, else
+INCONCLUSIVE.
+
+**Ordering rationale.**  A problem can be BOTH primal- and dual-infeasible
+(golden primal_infeasible_psd: empty feasible set AND a cone recession ray E_22
+orthogonal to the single constraint with positive objective -- it verifies BOTH
+certs).  Reporting PRIMAL_INFEASIBLE there is correct (the empty-feasible-set
+statement) and matches the point-mode firing class and the golden's
+expected_status.  The 4 dual/unbounded goldens fail the primal check on the
+b^T y sign (beta_lb in {-10.16, -10.16, 0, -5.779}), and the 2 primal goldens
+have no qualifying dual coordinate -- so the ordering yields exactly one cert on
+the 5 single-class goldens and the correct primal cert on the both-class one.
+
+#### 5.7.4 MEASURED (firing iterate at prec=256, lambda_max bounds at prec=384; the de-risk probe)
+
+| golden | point-mode status | tau | kappa | cert verified | binding margin |
+|--------|-------------------|-----|-------|---------------|----------------|
+| primal_infeasible_psd | PRIMAL_INFEASIBLE | 3.2e-9 | 19.1 | PRIMAL (also dual) | dup=0.000e+00 (=0, inclusive), beta_lb=+7.834 |
+| primal_infeasible_minor | PRIMAL_INFEASIBLE | 6.1e-11 | 25.2 | PRIMAL | dup=-5.379e-01, beta_lb=+25.24 |
+| unbounded_eig | DUAL_INFEASIBLE | 1.7e-9 | 0.64 | DUAL | C_kk=+1.0 (b0,k0) |
+| unbounded_lp | DUAL_INFEASIBLE | 1.7e-9 | 0.64 | DUAL | C_kk=+1.0 (b0,k0) |
+| dual_infeasible_diag | DUAL_INFEASIBLE | 4.1e-4 | 1.93 | DUAL | C_kk=+1.0 (b0,k0) |
+| dual_infeasible_3x3 | DUAL_INFEASIBLE | 7.2e-11 | 17.5 | DUAL | C_kk=+1.0 (b0,k0) |
+
+All 6 verify; no known_gap is needed.
+
+#### 5.7.5 References
+
+Jansson-Chaykin-Keil 2007, SIAM J. Numer. Anal. 46(1):180-200, §5 eqs. (5.1)
+(primal improving ray = dual infeasible) and (5.3) (dual improving ray = primal
+infeasible).  Jansson 2009, Japan J. Indust. Appl. Math. 26:337-363, §3.6
+Prop. 3.1 (primal infeasibility) and Prop. 3.2 (dual infeasibility).  Rump, BIT
+2006, 46:433-452 (verifying PSD of a singular matrix is ill-posed; verify PD via
+shifted Cholesky).  Andersen-Roos-Terlaky 2003, Math. Prog. 95(2):249-277
+(HSDE tau -> 0, kappa > 0 carries the certificate).  Gershgorin 1931 (disc
+theorem, rigorous eigenvalue bound).
 
 ---
 

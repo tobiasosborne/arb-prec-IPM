@@ -117,6 +117,41 @@ start Layer-1 work until the Layer-0 approximate solver is correct and performan
   **b20** (rigorous ball-verified Farkas cert, certify side) now has its corpus and
   is the natural next bead.
 
+- **b20 DONE (2026-06-26):** rigorous ball-verified Farkas infeasibility
+  certificates — the certify-side, user-facing status (epic.2 supplied the corpus
+  + the point-mode steering; b20 is the RIGOROUS verification, invariant 8).
+  MATH_SPEC §5.7. Two theorem-grade verifiers in `certify.c` (ball arithmetic):
+  `arbsdp_verify_primal_infeasible` — `D^b = sum_i y_i A_i^b` (RAW iterate y,
+  file-sign A_i, NO purify/negate; sign pinned from iterate.c `R_d`) is NSD via a
+  rigorous lambda_max upper bound `min(gershgorin_upper, verified-Cholesky-shift)
+  <= 0` (INCLUSIVE — the singular witness `primal_infeasible_psd` has lambda_max
+  EXACTLY 0, caught by Gershgorin's structural-zero row; the Cholesky shift CANNOT
+  certify a singular NSD matrix, so both are kept) AND `b^T y > 0` (lbound, strict);
+  `arbsdp_verify_dual_infeasible` — exact rank-1 COORDINATE recession ray `X_hat =
+  E_kk` (PSD by construction, no Cholesky, works at the boundary, invariant 1):
+  scans all (b,k) for `(A_i^b)_{kk} == 0` EXACTLY for all i (`arb_is_zero`,
+  zero-radius, the oc7 exact-data idiom) AND `(C_file^b)_{kk} > 0`. New top-level
+  `arbsdp_certify` dispatch is INFEASIBILITY-FIRST (primal, then dual, then
+  bracket), NOT tau-gated — REQUIRED because `dual_infeasible_diag` fires at
+  tau=4.1e-4 > TAU_HEALTHY=1e-6, and SAFE because the rigorous verifiers cannot
+  misfire on a feasible problem (Farkas exclusivity). New
+  `arbsdp_gershgorin_upper_bound` (rigorous lambda_max upper, mirror of the lower).
+  DE-RISK FIRST (rule 3): a measurement probe confirmed all 6 goldens verify (no
+  known_gap). GROUND TRUTH auditioned (rule 3): JCK 2007 §5 eq (5.1)/(5.3),
+  Jansson 2009 Prop 3.1/3.2, Rump 2006 (verifying PSD of a SINGULAR matrix is
+  ill-posed → use lambda_max-upper for the primal cert, rank-1 construction for the
+  dual), Andersen-Roos-Terlaky 2003. TDD: new `c/test/test_farkas.c` — the 6
+  goldens get the correct rigorous certify status (`primal_infeasible_psd` is
+  GENUINELY both-infeasible → reports PRIMAL, tried first); discriminators (b^T y
+  sign on the 4 dual goldens, coordinate detector on `minor`) + a feasible
+  no-misfire battery including the FILE-SIGN-C dual guard (a regression to the
+  internal `C_int` would spuriously fire dual-infeasible). ADVERSARIAL rigor review
+  (rule 2/8): 8 feasible/boundary problems + 6 positive controls, 0 false
+  positives. 16/16 ctest normal+ASan; valgrind definitely/indirectly-lost=0.
+  Unblocks b23, b24. REMAINING: general non-coordinate / higher-rank dual-
+  infeasibility rays (verified-linear-solve / Krawczyk, needs Layer-2 b24) → new
+  bead **arb-prec-IPM-psv**.
+
 ## Current state (2026-06-02)
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build
@@ -218,9 +253,11 @@ containing the optimum for tr-bounded goldens. Remaining, roughly by value:
 3. **arb-prec-IPM-9kg (P2):** a sign-discriminating golden so the bracket gate itself
    catches a `y_ext` sign regression (current max-eig goldens give symmetric
    `[-opt,+opt]` brackets that still contain opt under a wrong sign).
-4. **b20 (P1, verified Farkas):** primal/dual-infeasibility certificates from
-   `(tau,kappa)`. BLOCKED on **epic.2** (infeasible/unbounded goldens) — build epic.2
-   first. (`tau < TAU_HEALTHY` already routes to INCONCLUSIVE in `certify_bracket`.)
+4. **b20 (P1, verified Farkas) — DONE 2026-06-26.** Rigorous ball-verified
+   primal/dual-infeasibility certificates (`arbsdp_verify_primal_infeasible`,
+   `arbsdp_verify_dual_infeasible`, `arbsdp_certify`; MATH_SPEC §5.7; test_farkas).
+   All 6 epic.2 goldens certify rigorously; adversarial review found 0 false
+   positives. Follow-up for general non-coordinate dual rays: **arb-prec-IPM-psv**.
 5. **b21 (P2): CLI `arbsdp solve` + JSON serializer** — expose the bracket through the
    public ABI/CLI so the product is usable end to end.
 6. **Performance track (P1, parallel):** **wdz** (residual bits/digit 32–38 from Schur
@@ -265,5 +302,5 @@ gcc bench/brittle_probe.c -o /tmp/bp -I c/include -L c/build -larbsdp -lflint -l
 - b31: measurably fewer solves/iters/wall-ms to the same accuracy.
 - b32: an efficiency + robustness suite that fails on today's code and passes after.
 Layer 1 has since BEGUN and shipped its first rigorous bracket (b27→b17→b18→b19,
-2026-06-02; see the Layer-1 entry above). Next: tighten `lb` (b24 / dual
-correction), b20 (verified Farkas, needs epic.2), b21 (CLI/public ABI).
+2026-06-02; see the Layer-1 entry above). b20 (verified Farkas) DONE 2026-06-26.
+Next: b21 (CLI/public ABI), 8jr (tighten `lb`, general coupled primal bound).
