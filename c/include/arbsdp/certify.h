@@ -219,9 +219,16 @@ void arbsdp_apriori_set_ybar(arbsdp_apriori *ab, const arb_t value);
  * MATH_SPEC §5.4 (lower bound, Jansson-Chaykin-Keil 2007 Thm 3.2) and §5.5
  * (upper bound UB-A, its dual-side trace-mirror).  Both consume the SAME external
  * dual y_ext = -y_int (y_int = it->y / it->tau) and the SAME file-sign data
- * (C_file, A_i) via arbsdp_dual_residual; passing y_int (the WRONG sign) forms
- * Z_int = -Z_ext, swaps lambda_min<->lambda_max, and yields a bracket that
- * EXCLUDES the optimum (P0; §5.5 "Sign contract").
+ * (C_file, A_i) via arbsdp_dual_residual.  SIGN ROBUSTNESS (bead arb-prec-IPM-9kg):
+ * the bracket [lb, ub] CONTAINS p*_ext for ANY dual y given a valid xbar >= tr(X*)
+ * -- the Jansson bound holds at every dual point, tight only at the optimal one.
+ * So passing y_int (the forgot-to-negate bug) does NOT exclude the optimum: it
+ * forms the buggy residual Z_buggy = C_file - sum (y_int)_i A_i (NOT -Z_ext), which
+ * still yields a VALID but loose bracket containing p*, mirror-swapping the tight
+ * side and corrupting the lb/ub VALUES (lb falls strictly below the correct lb).
+ * A sign regression is therefore caught by the lb-VALUE / gap assertion in
+ * test_certify_bracket's sign self-test, NOT by bracket-containment (which is
+ * provably sign-robust).  See MATH_SPEC §5.5 "Sign contract".
  */
 
 /*

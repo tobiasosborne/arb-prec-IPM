@@ -274,9 +274,17 @@ containing the optimum for tr-bounded goldens. Remaining, roughly by value:
    brackets opt exactly; LOEWNER xbar=1 EXCLUDES (lb=2+2^-10, ub=2-2^-10). Mutation check
    (rule 9): a spurious `s_b` factor fails 4/6 assertions while rank-1 goldens stay green.
    14/14 ctest normal + ASan (zero leaks).
-3. **arb-prec-IPM-9kg (P2):** a sign-discriminating golden so the bracket gate itself
-   catches a `y_ext` sign regression (current max-eig goldens give symmetric
-   `[-opt,+opt]` brackets that still contain opt under a wrong sign).
+3. **arb-prec-IPM-9kg (P2) — CLOSED 2026-06-26 (premise disproven).** Goal was a
+   golden whose wrong-sign bracket EXCLUDES opt so the containment gate bites. PROVEN
+   IMPOSSIBLE: `lb <= opt <= ub` holds for ANY dual `y` given `xbar >= tr(X*)` (the
+   Jansson bound is valid at every dual point), so bracket-containment is sign-robust
+   and no discriminating golden exists. A wrong sign is just a non-optimal dual point
+   — it loosens the bracket / mirror-swaps the tight side, never excludes opt. The
+   sign IS defended by the lb-VALUE assertion already in `test_certify_bracket`'s sign
+   self-test (wrong-sign lb strictly below correct lb). Corrected the overstated
+   "wrong sign EXCLUDES opt / Z_int = -Z_ext" claims in `certify.h` + MATH_SPEC §5.5
+   (that identity holds only in the both-flipped internal frame). De-risk probe +
+   proof: rule 8 caught a false claim in the spec.
 4. **b20 (P1, verified Farkas) — DONE 2026-06-26.** Rigorous ball-verified
    primal/dual-infeasibility certificates (`arbsdp_verify_primal_infeasible`,
    `arbsdp_verify_dual_infeasible`, `arbsdp_certify`; MATH_SPEC §5.7; test_farkas).

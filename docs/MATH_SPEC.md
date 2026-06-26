@@ -894,14 +894,27 @@ A successful ball Cholesky of `(-Z_ext^b - s I)` proves `-Z_ext^b - s I >= 0`, i
 `lambda_min(-Z_ext^b) >= s`, i.e. `lambda_max(Z_ext^b) <= -s = dhi_b` (Rump 2006
 Cor 2.4; FLINT `arb_mat_cho` contract). QED.
 
-**Sign contract (P0).** Both `lb_ext` (§5.4) and `ub_ext` consume the SAME
-external dual `y_ext = -y_int` and the SAME file-sign data (C_file, A_i) via
-`arbsdp_dual_residual`. Passing `y_int` instead forms `Z_int = -Z_ext`, swaps
-lambda_min <-> lambda_max, and yields a bracket that EXCLUDES the optimum.
-Independent cross-check (defends against a double flip): the §5.4 lower bound run
-on the INTERNAL min-problem `p*_int = min <C_int,X>` gives
-`p*_int >= b^T y_int + sum_b min(0, dlo(Z_int^b)) xbar_b`; negating
-(`p*_ext = -p*_int`, with `Z_int = -Z_ext`) reproduces `ub_ext` exactly.
+**Sign contract (bead arb-prec-IPM-9kg).** Both `lb_ext` (§5.4) and `ub_ext`
+consume the SAME external dual `y_ext = -y_int` and the SAME file-sign data
+(C_file, A_i) via `arbsdp_dual_residual`. **Sign robustness (proven).** For ANY
+dual `y` and any valid `xbar_b >= tr(X*_b)`, the assembled `[lb, ub]` CONTAINS
+`p*_ext`: per block `min(0, lambda_min(Z_b)) xbar_b <= lambda_min(Z_b) tr(X*_b) <=
+<Z_b, X*_b>` (using `xbar_b >= tr(X*_b) >= 0` and the sign of `lambda_min`), and
+`p*_ext = b^T y + sum_b <Z_b, X*_b>`, so `lb = b^T y + sum_b min(0, lambda_min(Z_b))
+xbar_b <= p*_ext`; the upper bound mirrors. Consequently passing `y_int` (the
+forgot-to-negate bug) forms the BUGGY residual `Z_buggy = C_file - sum_i (y_int)_i
+A_i` (NOT `-Z_ext` -- that identity needs C flipped too; see the cross-check below)
+and yields a VALID but LOOSE bracket that STILL contains `p*_ext` -- a wrong sign is
+just a non-optimal dual point, it does NOT exclude the optimum. **Finding (CLAUDE
+rule 8): the bracket-contains-optimum rigor gate CANNOT catch a `y_ext` sign
+regression** (no discriminating golden can exist -- the containment is provably
+sign-robust). The sign is instead defended by asserting the lb VALUE / gap: the
+wrong-sign `lb` is strictly below the correct `lb` (test_certify_bracket sign
+self-test step (b)). Internal-frame cross-check (the both-flipped frame, where
+`Z_int = -Z_ext` DOES hold because `C_int = -C_file`): the §5.4 lower bound on the
+INTERNAL min-problem `p*_int = min <C_int,X>` gives `p*_int >= b^T y_int + sum_b
+min(0, dlo(Z_int^b)) xbar_b`; negating (`p*_ext = -p*_int`) reproduces `ub_ext`
+exactly.
 
 **Tightness.** A single `y` cannot make BOTH bounds tight for a max problem: at the
 solver's converged dual (`y_ext -> y*`), `Z_ext` sits on the PSD boundary so

@@ -534,7 +534,9 @@ test_sign_selftest(const golden_case *cases, int n)
      * Z_buggy = C_file - sum (y_int)_i A_i (neither Z_ext nor Z_int).
      *
      * IMPORTANT FINDING (CLAUDE.md rule 8, skepticism; the bead's premise was
-     * "wrong sign EXCLUDES opt", which is FALSE here): for the max-eigenvalue
+     * "wrong sign EXCLUDES opt", which is FALSE -- bead arb-prec-IPM-9kg PROVED no
+     * discriminating golden can exist: lb <= opt <= ub holds for ANY dual y given
+     * xbar >= tr(X*), so bracket-containment is sign-robust): for the max-eigenvalue
      * family the trace constraint is A_1 = I with b = [1], so at the converged
      * dual (y_ext = opt) the wrong sign gives y_int = -opt and
      *   Z_buggy = C + opt*I,  lambda_max(Z_buggy) = lambda_max(C) + opt = 2*opt,
