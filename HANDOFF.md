@@ -152,6 +152,30 @@ start Layer-1 work until the Layer-0 approximate solver is correct and performan
   infeasibility rays (verified-linear-solve / Krawczyk, needs Layer-2 b24) → new
   bead **arb-prec-IPM-psv**.
 
+- **b21 DONE (2026-06-26):** the `arbsdp solve` CLI + JSON result serializer — the
+  product is now usable end to end. `c/src/cli.c` (`arbsdp solve file.dat-s
+  [--prec N] [--prec-max M] [--target-digits D] [--trace-bound V | B:V]`) wires
+  read_sdpa → `arbsdp_solve_adaptive` → build `arbsdp_apriori` from `--trace-bound`
+  → `arbsdp_certify` (prec_c = final_prec+128) → `arbsdp_result_to_json` → stdout.
+  Serializer in `io.c` (`arbsdp_result_to_json`, `arbsdp_arb_decimal`): emits a
+  single JSON object (problem dims, solve {adaptive_status, value, final_prec,
+  iters, prec_history}, certificate {status, prec_c, obj_lb, obj_ub,
+  trace_bounds}). RIGOR (rule 2): `obj_lb`/`obj_ub` are DIRECTED decimals (lb via
+  MPFR RNDD, ub via RNDU) so the printed interval still encloses the optimum after
+  decimal rounding — unit-tested (lb-string <= x <= ub-string on 2/3, -2/3, exact,
+  ±inf). Fail-loud CLI (rule 5): usage/IO/parse errors → stderr + nonzero exit;
+  a completed run exits 0 regardless of optimal/infeasible/inconclusive (those are
+  RESULTS in the JSON, not errors). Build note (rule 12): `<mpfr.h>` must precede
+  FLINT headers for `arf_get_mpfr`; `cli.c` excluded from the library glob so no
+  stray `main` in `libarbsdp.so`. TDD: `test_serialize.c` (directed-decimal rigor
+  + serialize-after-solve, python3 `json.load` round-trip) and `test_cli.c` (drives
+  the real binary: optimal/dual_infeasible JSON, error-path exit codes, JSON
+  round-trip through python3). 18/18 ctest normal+ASan; valgrind 0 leaks on the
+  solve path AND the error-exit paths. Demo: `arbsdp solve max_eigenvalue_2x2
+  --target-digits 12 --trace-bound 1` → status optimal, [2.9999…994, 3.0000…005].
+  Unblocks **b22** (Julia FFI). v1 JSON omits the full X/y/S enclosure dumps (just
+  the bracket + status + diagnostics) — a richer payload is a later option.
+
 ## Current state (2026-06-02)
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build
@@ -258,7 +282,10 @@ containing the optimum for tr-bounded goldens. Remaining, roughly by value:
    `arbsdp_verify_dual_infeasible`, `arbsdp_certify`; MATH_SPEC §5.7; test_farkas).
    All 6 epic.2 goldens certify rigorously; adversarial review found 0 false
    positives. Follow-up for general non-coordinate dual rays: **arb-prec-IPM-psv**.
-5. **b21 (P2): CLI `arbsdp solve` + JSON serializer** — expose the bracket through the
+5. **b21 (P2): CLI `arbsdp solve` + JSON serializer — DONE 2026-06-26.** The
+   product runs end to end (`arbsdp solve file.dat-s --trace-bound V`); rigorous
+   directed-decimal `[obj_lb,obj_ub]` + verified status as JSON. Unblocks b22 (Julia).
+   (original note:) expose the bracket through the
    public ABI/CLI so the product is usable end to end.
 6. **Performance track (P1, parallel):** **wdz** (residual bits/digit 32–38 from Schur
    conditioning + controller granularity), **b31** (warm-start / skip-doomed solves),

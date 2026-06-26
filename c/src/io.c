@@ -27,13 +27,23 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* mpfr.h MUST precede the FLINT headers: flint/arf.h declares the mpfr-interop
+ * functions (arf_get_mpfr) only inside `#ifdef __MPFR_H`, i.e. only if mpfr.h's
+ * include guard is already defined.  Including it after arf.h yields an implicit
+ * declaration (FLINT_NOTES.md / CLAUDE.md rule 12: confirm symbol availability). */
+#include <mpfr.h>
+
 #include <flint/arb.h>
 #include <flint/arb_mat.h>
+#include <flint/arf.h>
 
+#include "arbsdp/api.h"
+#include "arbsdp/io.h"
 #include "arbsdp/problem.h"
 
 /* -------------------------------------------------------------------------
@@ -492,4 +502,278 @@ arbsdp_problem_b(arb_t out, const arbsdp_problem *p, int i, slong prec)
     assert(p != NULL);
     assert(i >= 0 && i < p->m);
     return arb_set_str(out, p->b[i], prec) ? 1 : 0;
+}
+
+/* =========================================================================
+ * JSON result serializer + rigorous directed decimal (bead arb-prec-IPM-b21)
+ * =========================================================================
+ * This is the testable core of the CLI (the CLI driver itself is a later step).
+ * arbsdp_result_to_json hand-rolls a single JSON object (no JSON library) from a
+ * full solve+certify result; arbsdp_arb_decimal is the rigour-critical helper it
+ * leans on so the printed [obj_lb, obj_ub] still ENCLOSES the optimum after
+ * decimal rounding (CLAUDE.md rule 2).
+ *
+ * SCHEMA (keys in this exact order; valid JSON, no trailing commas):
+ *   {
+ *     "arbsdp_version": "<ARBSDP_VERSION>",
+ *     "problem": { "m": <int>, "nblocks": <int>,
+ *                  "block_sizes": [<signed ints>], "maximize": <true|false> },
+ *     "solve": { "adaptive_status": "<optimal|limit|infeasible>",
+ *                "value": "<directed decimal of ar->res.value, round_up=1>",
+ *                "final_prec": <slong>, "iters": <int>,
+ *                "prec_history": [<prec bits per escalation step>] },
+ *     "certificate": { "status": "<optimal|inconclusive|primal_infeasible|
+ *                                  dual_infeasible>",
+ *                      "prec_c": <slong>,
+ *                      "obj_lb": "<directed decimal of lb, round_up=0>",
+ *                      "obj_ub": "<directed decimal of ub, round_up=1>",
+ *                      "trace_bounds": { "<b>": "<decimal of xbar[b], round_up=1>",
+ *                                        ... for each b with xbar_set[b] } }
+ *   }
+ *
+ * RIGOR (CLAUDE.md rule 2): obj_lb is rounded toward -inf and obj_ub toward +inf
+ * (arbsdp_arb_decimal), so the printed interval rigorously brackets the optimum
+ * even after the decimal rounding.  +/-inf endpoints print as "-inf"/"+inf".
+ *
+ * Memory (CLAUDE.md rule 7): both functions return a malloc'd string the CALLER
+ * frees.  arbsdp_result_to_json frees every arbsdp_arb_decimal result it embeds;
+ * arbsdp_arb_decimal clears its arf_t / mpfr_t temporaries.
+ * ====================================================================== */
+
+/* dup_cstr -- malloc a copy of `s` (so the result is free()-able by the caller,
+ * NOT mpfr_free_str-able).  strdup is POSIX, not C11, so we avoid it here. */
+static char *
+dup_cstr(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *out = malloc(n);
+    assert(out != NULL);
+    memcpy(out, s, n);
+    return out;
+}
+
+char *
+arbsdp_arb_decimal(const arb_t x, int round_up, slong digits)
+{
+    arf_t endpoint;
+    slong mant_prec;
+    char *out;
+
+    if (digits < 1)
+        digits = 1;
+
+    /* mantissa precision >= ceil(digits*log2(10)) + 8 bits (log2(10) ~ 3.3219).
+     * Computed without <math.h> (manual ceil). */
+    {
+        double bits = (double) digits * 3.321928094887362;
+        mant_prec = (slong) bits;
+        if ((double) mant_prec < bits)
+            mant_prec += 1;
+        mant_prec += 8;
+    }
+
+    /* Take x's DIRECTED endpoint: ubound (>= true x) for an upper bound, lbound
+     * (<= true x) for a lower bound.  arb_get_ubound_arf rounds UP and
+     * arb_get_lbound_arf rounds DOWN, so the directedness holds at any prec. */
+    arf_init(endpoint);
+    if (round_up)
+        arb_get_ubound_arf(endpoint, x, mant_prec);
+    else
+        arb_get_lbound_arf(endpoint, x, mant_prec);
+
+    if (arf_is_nan(endpoint)) {
+        out = dup_cstr("nan");
+    } else if (arf_is_inf(endpoint)) {
+        out = dup_cstr(arf_sgn(endpoint) > 0 ? "+inf" : "-inf");
+    } else {
+        mpfr_t m;
+        char *mstr = NULL;
+        /* arf -> mpfr with the SAME directed rounding; endpoint already has
+         * <= mant_prec bits, so this conversion is exact (no further rounding).
+         * Then format with the SAME directed rounding so every step preserves the
+         * bound: round_up=1 -> value >= true x; round_up=0 -> value <= true x. */
+        mpfr_init2(m, mant_prec);
+        arf_get_mpfr(m, endpoint, round_up ? MPFR_RNDU : MPFR_RNDD);
+        mpfr_asprintf(&mstr, round_up ? "%.*RUe" : "%.*RDe",
+                      (int) (digits - 1), m);
+        assert(mstr != NULL);
+        out = dup_cstr(mstr);
+        mpfr_free_str(mstr);
+        mpfr_clear(m);
+    }
+
+    arf_clear(endpoint);
+    return out;
+}
+
+/* ----- enum -> string mappers ------------------------------------------- */
+
+static const char *
+adaptive_status_str(arbsdp_adaptive_status s)
+{
+    switch (s) {
+    case ARBSDP_ADAPTIVE_OPTIMAL:    return "optimal";
+    case ARBSDP_ADAPTIVE_LIMIT:      return "limit";
+    case ARBSDP_ADAPTIVE_INFEASIBLE: return "infeasible";
+    }
+    return "unknown";
+}
+
+static const char *
+certify_status_str(arbsdp_certify_status s)
+{
+    switch (s) {
+    case ARBSDP_CERTIFY_OPTIMAL_BRACKET:   return "optimal";
+    case ARBSDP_CERTIFY_INCONCLUSIVE:      return "inconclusive";
+    case ARBSDP_CERTIFY_PRIMAL_INFEASIBLE: return "primal_infeasible";
+    case ARBSDP_CERTIFY_DUAL_INFEASIBLE:   return "dual_infeasible";
+    }
+    return "unknown";
+}
+
+/* significant decimal digits implied by `prec` bits: floor(prec*log10(2))+1,
+ * capped to [1, 1000] (avoids absurd field widths from a huge prec). */
+static slong
+digits_from_prec(slong prec)
+{
+    slong d = (slong) ((double) prec * 0.301) + 1;
+    if (d < 1)
+        d = 1;
+    if (d > 1000)
+        d = 1000;
+    return d;
+}
+
+/* ----- a tiny growable string buffer (asserts on OOM; CLAUDE.md rule 5) -- */
+
+typedef struct {
+    char  *p;
+    size_t len;
+    size_t cap;
+} sbuf;
+
+static void
+sbuf_init(sbuf *s)
+{
+    s->cap = 256;
+    s->p = malloc(s->cap);
+    assert(s->p != NULL);
+    s->p[0] = '\0';
+    s->len = 0;
+}
+
+static void
+sbuf_reserve(sbuf *s, size_t extra)
+{
+    if (s->len + extra + 1 > s->cap) {
+        size_t newcap = s->cap;
+        while (s->len + extra + 1 > newcap)
+            newcap *= 2;
+        char *grown = realloc(s->p, newcap);
+        assert(grown != NULL);
+        s->p = grown;
+        s->cap = newcap;
+    }
+}
+
+static void
+sbuf_puts(sbuf *s, const char *str)
+{
+    size_t n = strlen(str);
+    sbuf_reserve(s, n);
+    memcpy(s->p + s->len, str, n + 1);
+    s->len += n;
+}
+
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static void
+sbuf_printf(sbuf *s, const char *fmt, ...)
+{
+    va_list ap, ap2;
+    int n;
+
+    va_start(ap, fmt);
+    va_copy(ap2, ap);
+    n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    assert(n >= 0);
+    sbuf_reserve(s, (size_t) n);
+    vsnprintf(s->p + s->len, (size_t) n + 1, fmt, ap2);
+    va_end(ap2);
+    s->len += (size_t) n;
+}
+
+char *
+arbsdp_result_to_json(const arbsdp_problem *p,
+                      const arbsdp_adaptive_result *ar,
+                      arbsdp_certify_status cstatus,
+                      const arb_t lb, const arb_t ub,
+                      slong prec_c, const arbsdp_apriori *ab)
+{
+    assert(p != NULL);
+    assert(ar != NULL); /* NOT NULL-safe (io.h contract) */
+
+    slong digits_val = digits_from_prec(ar->final_prec);
+    slong digits_c   = digits_from_prec(prec_c);
+
+    sbuf s;
+    sbuf_init(&s);
+
+    sbuf_puts(&s, "{");
+
+    /* version */
+    sbuf_printf(&s, "\"arbsdp_version\": \"%s\", ", ARBSDP_VERSION);
+
+    /* problem */
+    sbuf_printf(&s, "\"problem\": {\"m\": %d, \"nblocks\": %d, \"block_sizes\": [",
+                p->m, p->nblocks);
+    for (int b = 0; b < p->nblocks; b++)
+        sbuf_printf(&s, "%s%d", b ? ", " : "", p->block_sizes[b]);
+    sbuf_printf(&s, "], \"maximize\": %s}, ", p->maximize ? "true" : "false");
+
+    /* solve (point-mode recovered objective; round_up=1 acceptable, io.h note) */
+    {
+        char *val = arbsdp_arb_decimal(ar->res.value, 1, digits_val);
+        sbuf_printf(&s,
+                    "\"solve\": {\"adaptive_status\": \"%s\", \"value\": \"%s\", "
+                    "\"final_prec\": %lld, \"iters\": %d, \"prec_history\": [",
+                    adaptive_status_str(ar->status), val,
+                    (long long) ar->final_prec, ar->res.iters);
+        free(val);
+        for (int k = 0; k < ar->prec_history_len; k++)
+            sbuf_printf(&s, "%s%lld", k ? ", " : "",
+                        (long long) ar->prec_history[k].prec);
+        sbuf_puts(&s, "]}, ");
+    }
+
+    /* certificate (obj_lb toward -inf, obj_ub toward +inf -> rigorous enclosure) */
+    {
+        char *slb = arbsdp_arb_decimal(lb, 0, digits_c);
+        char *sub = arbsdp_arb_decimal(ub, 1, digits_c);
+        sbuf_printf(&s,
+                    "\"certificate\": {\"status\": \"%s\", \"prec_c\": %lld, "
+                    "\"obj_lb\": \"%s\", \"obj_ub\": \"%s\", \"trace_bounds\": {",
+                    certify_status_str(cstatus), (long long) prec_c, slb, sub);
+        free(slb);
+        free(sub);
+
+        if (ab != NULL) {
+            int first = 1;
+            for (int b = 0; b < ab->nblocks; b++) {
+                if (ab->xbar_set[b]) {
+                    char *xb = arbsdp_arb_decimal(&ab->xbar[b], 1, digits_c);
+                    sbuf_printf(&s, "%s\"%d\": \"%s\"", first ? "" : ", ", b, xb);
+                    free(xb);
+                    first = 0;
+                }
+            }
+        }
+        sbuf_puts(&s, "}}");
+    }
+
+    sbuf_puts(&s, "}");
+
+    return s.p; /* caller frees */
 }

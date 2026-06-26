@@ -41,11 +41,43 @@ ctest --test-dir c/build-asan
 Requires FLINT 3.x (bundles Arb), GMP, MPFR, and a C11 compiler.
 On Debian/Ubuntu: `sudo apt-get install libflint-dev`.
 
+## Usage (CLI)
+
+`arbsdp solve` reads an SDPA-sparse `.dat-s` problem, solves it (adaptive
+precision), certifies a rigorous `[lb, ub]` bracket on the optimum (or a verified
+infeasibility status), and prints a JSON result:
+
+```bash
+arbsdp solve problem.dat-s --target-digits 30 --trace-bound 1
+```
+
+```json
+{
+  "problem": { "m": 1, "nblocks": 1, "block_sizes": [2], "maximize": true },
+  "solve": { "adaptive_status": "optimal", "final_prec": 256, "iters": 9, ... },
+  "certificate": {
+    "status": "optimal",
+    "obj_lb": "2.999...994e+00",
+    "obj_ub": "3.000...005e+00"
+  }
+}
+```
+
+`--trace-bound V` (or `B:V` per block) supplies the a-priori `tr X ≤ V` bound that
+a finite rigorous bracket requires; without it an unbounded block is reported
+honestly as `-inf`/`+inf`. The printed `obj_lb`/`obj_ub` are *directed* decimals
+(lb rounded down, ub rounded up) so the printed interval still encloses the
+optimum. A `status` of `primal_infeasible` / `dual_infeasible` is a verified
+ball-arithmetic Farkas certificate. Run `arbsdp --help` for all options.
+
 ## Status
 
-Early development. Foundations (svec, point-mode spectral/NT scaling, build
-infra, golden masters) are in place; the Layer-0 solve and Layer-1 certification
-are in progress. See `docs/PRD.md` for the roadmap.
+Early development, but the core product runs end to end: the Layer-0 adaptive
+solve, the Layer-1 rigorous `[lb, ub]` certificate, verified primal/dual
+infeasibility certificates, and the `arbsdp solve` CLI / JSON serializer are in
+place. Tightening the lower bound for general coupled problems, and the Julia
+cockpit (modeling, golden-master harness), are in progress. See `docs/PRD.md` for
+the roadmap.
 
 ## License
 

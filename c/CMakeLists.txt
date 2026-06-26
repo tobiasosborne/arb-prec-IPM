@@ -39,6 +39,11 @@ pkg_check_modules(FLINT REQUIRED flint)
 # ---- Library target ------------------------------------------------------
 file(GLOB ARBSDP_SOURCES "src/*.c")
 
+# cli.c defines main() for the `arbsdp` executable; it is NOT part of the
+# library.  Exclude it from the globbed library sources so libarbsdp does not
+# export a stray main symbol.
+list(REMOVE_ITEM ARBSDP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/cli.c")
+
 add_library(arbsdp SHARED ${ARBSDP_SOURCES})
 
 target_include_directories(arbsdp
@@ -68,6 +73,23 @@ target_link_directories(arbsdp
 
 # Pass any compile flags pkg-config reports (e.g. -pthread on some distros).
 target_compile_options(arbsdp PRIVATE ${FLINT_CFLAGS_OTHER})
+
+# ---- CLI executable ------------------------------------------------------
+# The `arbsdp` command-line driver (bead arb-prec-IPM-b21).  The internal target
+# name is arbsdp_cli to avoid clashing with the library target `arbsdp`; the
+# emitted binary is named `arbsdp` (OUTPUT_NAME).  It links the library exactly
+# as the test executables do, plus libm.
+add_executable(arbsdp_cli src/cli.c)
+
+set_target_properties(arbsdp_cli PROPERTIES OUTPUT_NAME arbsdp)
+
+target_include_directories(arbsdp_cli
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_link_libraries(arbsdp_cli PRIVATE arbsdp m)
 
 # ---- Tests ---------------------------------------------------------------
 enable_testing()
@@ -343,3 +365,50 @@ target_compile_definitions(test_certify_bracket
 target_link_libraries(test_certify_bracket PRIVATE arbsdp m)
 
 add_test(NAME test_certify_bracket COMMAND test_certify_bracket)
+
+# The JSON result serializer + the rigour-critical directed-decimal helper (bead
+# arb-prec-IPM-b21): the testable core of the CLI.  Loads goldens
+# (max_eigenvalue_2x2, dual_infeasible_diag) so it needs an absolute GOLDEN_DIR
+# (as test_io does); links libm for parity with the other golden tests.
+add_executable(test_serialize test/test_serialize.c)
+
+target_include_directories(test_serialize
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_serialize
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+)
+
+target_link_libraries(test_serialize PRIVATE arbsdp m)
+
+add_test(NAME test_serialize COMMAND test_serialize)
+
+# The CLI smoke test (bead arb-prec-IPM-b21): drives the REAL `arbsdp` binary via
+# popen/pclose and inspects its stdout + exit codes (full read->solve->certify->
+# JSON pipeline through the user-facing surface).  It links NOTHING from the
+# library -- it only execs the binary -- so it needs no arbsdp/m link; the include
+# path is for the lightweight arbsdp/api.h (ARBSDP_VERSION macro only).  The binary
+# path is passed as the ARBSDP_BIN compile def via a generator expression
+# ($<TARGET_FILE:arbsdp_cli>), and GOLDEN_DIR as an absolute path like test_io.
+# add_dependencies ensures the CLI binary is built before this test runs.
+add_executable(test_cli test/test_cli.c)
+
+target_include_directories(test_cli
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_cli
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+        ARBSDP_BIN="$<TARGET_FILE:arbsdp_cli>"
+)
+
+add_dependencies(test_cli arbsdp_cli)
+
+add_test(NAME test_cli COMMAND test_cli)
