@@ -6,8 +6,9 @@
  * GROUND TRUTH (CLAUDE.md rule 3):
  *   - docs/MATH_SPEC.md §3.1 (HSDE system, mu denom n+1), §3.2 (residuals).
  *   - HsdeNtSdpSolver.ts:371-407 (residual assembly + mu + objectives).
- *   - CLAUDE.md invariant 7 (internal min -<C,X>; C_int = -C_file here -- see
- *     iterate.h banner), invariant 8 (HSDE tau,kappa).
+ *   - CLAUDE.md invariant 7 (internal min <C_int,X>; C_int = -C_file when
+ *     maximize, +C_file when minimize -- bead n1x, see iterate.h banner),
+ *     invariant 8 (HSDE tau,kappa).
  * REUSE (no duplication): arbsdp_problem_block_mat / arbsdp_problem_b (problem.h),
  * arbsdp_frob_inner (svec.h).
  */
@@ -56,10 +57,18 @@ arbsdp_iterate_init(arbsdp_iterate *it, const arbsdp_problem *p, slong prec)
         arb_mat_init(it->X[b], n, n);
         arb_mat_init(it->S[b], n, n);
         arb_mat_init(it->R_d[b], n, n);
-        /* C_int^b = -C_file^b  (matno 0 = C; sign convention, iterate.h banner) */
+        /* C_int^b: the internal cost block (matno 0 = C).  The internal loop
+         * always MINIMIZES <C_int,X> (invariant 7); recover_value (solve.c)
+         * applies the matching output sign (maximize ? -pObj/tau : +pObj/tau).
+         * For max <C_file,X> we need C_int = -C_file (min of the negative = max);
+         * for min <C_file,X> we need C_int = +C_file.  So negate ONLY when
+         * maximize (MATH_SPEC §1.2; invariant 7; bead arb-prec-IPM-n1x -- the
+         * unconditional negate solved every minimize problem as a maximize and
+         * returned -(max<C,X>) instead of min<C,X>).  See iterate.h banner. */
         arb_mat_init(it->C_int[b], n, n);
-        arbsdp_problem_block_mat(it->C_int[b], p, 0, b, prec);
-        arb_mat_neg(it->C_int[b], it->C_int[b]);
+        arbsdp_problem_block_mat(it->C_int[b], p, 0, b, prec);   /* C_file^b */
+        if (p->maximize)
+            arb_mat_neg(it->C_int[b], it->C_int[b]);   /* C_int = -C_file (max) */
     }
 
     it->y = _arb_vec_init(p->m);

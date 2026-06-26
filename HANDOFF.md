@@ -176,6 +176,32 @@ start Layer-1 work until the Layer-0 approximate solver is correct and performan
   Unblocks **b22** (Julia FFI). v1 JSON omits the full X/y/S enclosure dumps (just
   the bracket + status + diagnostics) — a richer payload is a later option.
 
+- **n1x DONE (2026-06-26):** fixed a LATENT SIGN BUG in the minimize (maximize=0)
+  objective path + wired minimize into the gated golden suite. ROOT CAUSE (rule 8,
+  found by a de-risk probe): `iterate.c` negated `C_int = -C_file` UNCONDITIONALLY,
+  but per MATH_SPEC §1.2 / invariant 7 the negate is correct ONLY for maximize —
+  the internal loop minimizes `<C_int,X>`, so max needs `C_int=-C_file` and min
+  needs `C_int=+C_file`; `recover_value` already applied the matching output sign
+  conditionally. So a minimize solve returned `-(max<C,X>)` (measured: −3 for
+  `min<diag(1,3),X> s.t. tr=1`, true min = 1). Every golden was maximize=1, so the
+  whole green suite missed it. FIX: negate `C_int` iff `p->maximize` (one line +
+  banner). Then minimize recovers `+pObj/tau = min<C_file,X>` (measured: 1; maximize
+  unchanged at 3). GOLDEN INTEGRATION: added a `maximize` provenance key
+  (`golden_provenance.{h,c}`, default 1 → 22 existing goldens unchanged), a
+  `test_golden` override (`p.maximize = c->maximize` after read_sdpa; read_sdpa
+  hardcodes 1), and the minimize golden `min_eig_path_4` (min `<tridiag(2,1)_4,X>`
+  s.t. tr X=1; opt = lambda_min = (3−√5)/2 = 0.38196601125… to 65 digits;
+  maximize=false). TDD: RED-GREEN unit test `test_minimize_sign` in test_solve.c
+  (embedded min<diag(1,3)> → 1; sign-flip guard: maximize → 3) + the golden gate
+  (min_eig_path_4 recovers 0.381966 to 31 digits, corr=PASS). Cross-check: the SAME
+  C gives 3.618 maximizing / 0.382 minimizing (CLI confirms lambda_max=3.618…).
+  23-golden gate PASS (40 pairs, 0 FAIL), 18/18 ctest normal+ASan, valgrind 0/0/0
+  (also fixed a pre-existing test_solve.c flint_cleanup leak baseline). CAVEAT
+  (flagged, follow-up **arb-prec-IPM-fjw**): Layer-1 certify (`arbsdp_certify` /
+  certify_bracket) is still hardwired for max `<C_file,X>` — minimize CERTIFICATION
+  is unsound until fjw (the minimize SOLVE is correct; the CLI has no minimize flag
+  so certify-on-minimize is not yet reachable).
+
 ## Current state (2026-06-02)
 
 `libarbsdp` (C, FLINT/Arb) builds with `cmake -S c -B c/build && cmake --build

@@ -1,0 +1,20 @@
+{
+  "name": "min_eig_path_4",
+  "source": "wolframscript",
+  "description": "4x4 SDP: min <C,X> s.t. tr(X)=1, X 4x4 PSD, C = tridiagonal Toeplitz T_4(2,1) (diagonal 2, off-diagonal 1). By the variational formula opt = lambda_min(C) = 2 + 2 cos(4*pi/5) = 2 - 2 cos(pi/5) = (3 - sqrt(5))/2 = 0.38196... Optimal X* is the rank-1 projector onto the BOTTOM eigenvector (singular, boundary optimum). Exercises the minimize (maximize=0) objective path (bead arb-prec-IPM-n1x).",
+  "m": 1,
+  "nblocks": 1,
+  "block_sizes": [4],
+  "maximize": false,
+  "optimal_value": "0.38196601125010515179541316563436188227969082019423713786455137729",
+  "optimal_value_digits": 65,
+  "reference_method": "Closed form lambda_min(T_n(2,1)) = 2 + 2 cos(n*pi/(n+1)); n=4 -> 2 - 2 cos(pi/5) = (3 - sqrt(5))/2. Cross-checked in mpmath (mp.dps=80) against 2+2*cos(4*pi/5) to < 5e-71.",
+  "generated_by": "arbsdp golden-master generator epic.3 / mpmath",
+  "expected_status": "optimal",
+  "target_digits": 30,
+  "prec_cap": 1024,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 100,
+  "expected_max_iters": 200,
+  "known_gaps": []
+}

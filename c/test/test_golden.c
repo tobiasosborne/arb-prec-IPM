@@ -232,6 +232,10 @@ int main(void) {
             continue;
         }
 
+        /* read_sdpa hardcodes p.maximize=1 (io.c:62); the provenance "maximize" key
+         * drives the minimize path -- bead arb-prec-IPM-n1x. */
+        p.maximize = c->maximize;
+
         arbsdp_precision_params pp;
         arbsdp_precision_default_params(&pp);
         pp.target_digits = c->target_digits;

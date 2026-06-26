@@ -50,7 +50,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>     /* getpid() -- unique temp .dat-s path (test_minimize_sign) */
 
+#include <flint/flint.h>   /* flint_cleanup() -- free FLINT's fmpz pool at exit */
 #include <flint/arb.h>
 #include <flint/arb_mat.h>
 
@@ -458,6 +460,133 @@ test_epic6_lowprec_optimal(void)
     arbsdp_problem_clear(&p);
 }
 
+/* ------------------------------------------------------------------------- *
+ * Test 6 (bead arb-prec-IPM-n1x): the MINIMIZE (maximize=0) objective path.    *
+ *                                                                             *
+ * Problem: min/max <C,X> s.t. tr X = 1, X >= 0, with C = diag(1,3) (a 2x2 PSD  *
+ * block).  By the variational characterization over {tr X = 1, X >= 0},       *
+ *     min <C,X> = lambda_min(C) = 1   (X* = diag(1,0), RANK-DEFICIENT boundary)*
+ *     max <C,X> = lambda_max(C) = 3   (X* = diag(0,1))                         *
+ * so the maximize/minimize flag MUST change the answer between 1 and 3.        *
+ *                                                                             *
+ * RED (pre-fix): c/src/iterate.c negated C_int = -C_file UNCONDITIONALLY, so a *
+ * minimize problem was solved as a maximize (internal loop minimizes pObj =    *
+ * -<C_file,X>, i.e. maximizes <C_file,X>); recover_value then applied the      *
+ * MINIMIZE output sign (+pObj/tau), yielding -(max) = -3 instead of min = 1.   *
+ * Assertion (2) below (|value - 1| < 1e-6) therefore FAILS at value ~ -3.      *
+ * GREEN (post-fix): iterate.c negates C_int only when maximize, so for a       *
+ * minimize problem C_int = +C_file, the loop minimizes <C_file,X>, and         *
+ * recover_value (+pObj/tau) returns +1.                                        *
+ *                                                                             *
+ * SIGN-FLIP MUTATION GUARD (CLAUDE.md rule 9): the SAME problem is solved with *
+ * maximize=1 (must give 3) and maximize=0 (must give 1, and must NOT give 3).  *
+ * A solver that ignored maximize -- or the pre-fix unconditional negate --     *
+ * returns -3 (or 3) for the minimize case, failing assertion (2).             *
+ * ------------------------------------------------------------------------- */
+static void
+test_minimize_sign(void)
+{
+    /* Embedded SDPA-sparse: m=1, one 2x2 PSD block; b=[1]; C=diag(1,3); A_1=I
+     * (so <A_1,X> = tr X = 1).  Written to a unique temp file and parsed via
+     * arbsdp_read_sdpa, mirroring test_infeasible.c's embedded-.dat-s idiom. */
+    static const char DATS[] =
+        "* test_minimize_sign (bead arb-prec-IPM-n1x): <C,X> s.t. tr X=1, X>=0; C=diag(1,3)\n"
+        "1\n"
+        "1\n"
+        "2\n"
+        "1.0\n"
+        "0 1 1 1 1.0\n"
+        "0 1 2 2 3.0\n"
+        "1 1 1 1 1.0\n"
+        "1 1 2 2 1.0\n";
+
+    char path[256];
+    FILE *f;
+    arbsdp_problem p;
+    arbsdp_solve_params params;
+    slong prec = 256;
+    arb_t v_min, v_max;
+    arbsdp_solve_status st_min = ARBSDP_SOLVE_NUMERICAL;
+    arbsdp_solve_status st_max = ARBSDP_SOLVE_NUMERICAL;
+
+    snprintf(path, sizeof path, "/tmp/arbsdp_test_min_%d.dat-s", (int) getpid());
+    f = fopen(path, "w");
+    CHECK(f != NULL, "minimize_sign: cannot open temp .dat-s");
+    if (f == NULL) return;
+    fputs(DATS, f);
+    fclose(f);
+
+    arbsdp_problem_init(&p);
+    if (arbsdp_read_sdpa(&p, path) != 0) {
+        CHECK(0, "minimize_sign: cannot parse embedded .dat-s");
+        arbsdp_problem_clear(&p);
+        remove(path);
+        return;
+    }
+
+    arbsdp_solve_default_params(&params);
+    arb_init(v_min);
+    arb_init(v_max);
+
+    /* --- (A) MINIMIZE: maximize = 0 -> value must be lambda_min(C) = 1. --- */
+    {
+        arbsdp_result res;
+        p.maximize = 0;
+        arbsdp_solve(&res, &p, prec, &params);
+        arb_set(v_min, res.value);
+        st_min = res.status;
+        {
+            char *vs = arb_get_str(res.value, 20, ARB_STR_NO_RADIUS);
+            printf("\n  MINIMIZE (bead n1x): C=diag(1,3), maximize=0 -> value = %s "
+                   "(status=%s).\n", vs, status_name(st_min));
+            flint_free(vs);
+        }
+        arbsdp_result_clear(&res);
+    }
+
+    /* --- (B) MAXIMIZE: SAME problem, maximize = 1 -> value must be
+     *     lambda_max(C) = 3 (the sign-flip mutation guard). --- */
+    {
+        arbsdp_result res;
+        p.maximize = 1;
+        arbsdp_solve(&res, &p, prec, &params);
+        arb_set(v_max, res.value);
+        st_max = res.status;
+        {
+            char *vs = arb_get_str(res.value, 20, ARB_STR_NO_RADIUS);
+            printf("    MAXIMIZE: same problem, maximize=1 -> value = %s "
+                   "(status=%s).\n", vs, status_name(st_max));
+            flint_free(vs);
+        }
+        arbsdp_result_clear(&res);
+    }
+
+    /* (1) minimize reaches OPTIMAL. */
+    CHECK(st_min == ARBSDP_SOLVE_OPTIMAL,
+          "minimize_sign: minimize status must be OPTIMAL");
+
+    /* (2) GREEN assertion the fix enables: minimize value ~ lambda_min = 1.
+     *     PRE-FIX this is ~ -3 and FAILS (the unconditional C_int negate). */
+    CHECK(close_str(v_min, GOLD_TRIVIAL, 1e-6),
+          "minimize_sign: minimize value must be lambda_min = 1 (bead n1x fix)");
+
+    /* (3) SIGN-FLIP MUTATION GUARD (rule 9): the same problem maximized gives
+     *     lambda_max = 3, and the minimize value is NOT 3 -- the flag genuinely
+     *     changes the answer. */
+    CHECK(st_max == ARBSDP_SOLVE_OPTIMAL,
+          "minimize_sign: maximize status must be OPTIMAL");
+    CHECK(close_str(v_max, GOLD_MAXEIG2, 1e-6),
+          "minimize_sign: maximize value must be lambda_max = 3");
+    CHECK(!close_str(v_min, GOLD_MAXEIG2, 1e-6),
+          "minimize_sign: minimize value must NOT equal lambda_max = 3 "
+          "(maximize flag must change the answer)");
+
+    arb_clear(v_min);
+    arb_clear(v_max);
+    arbsdp_problem_clear(&p);
+    remove(path);
+}
+
 int
 main(void)
 {
@@ -465,6 +594,12 @@ main(void)
     test_beat_or_bracket();
     test_mutation_sign();
     test_epic6_lowprec_optimal();
+    test_minimize_sign();
+
+    /* Free FLINT's thread-local mpz/fmpz recycling pool so valgrind does not
+     * report it as "possibly lost" at exit (CLAUDE.md rule 7: a clean run;
+     * mirrors test_serialize.c).  Pre-existing test_solve omitted this. */
+    flint_cleanup();
 
     if (failures != 0) {
         fprintf(stderr, "\ntest_solve: %d check(s) FAILED\n", failures);

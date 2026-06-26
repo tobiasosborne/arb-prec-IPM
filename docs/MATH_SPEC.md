@@ -58,6 +58,18 @@ C is already stored, so `pObj` corresponds to the internal minimization
 objective, while `pObj/tau` purified and negated is the user-facing value).
 Source: HsdeNtSdpSolver.ts:392-414.
 
+**Implementation of the maximize/minimize sign (bead arb-prec-IPM-n1x).** The
+internal loop ALWAYS minimizes `<C_int, X>`.  `arbsdp_iterate_init` (`iterate.c`)
+materializes `C_file` (matno 0) and negates it to `C_int = -C_file` ONLY when
+`p->maximize` (so `min <C_int,X> = max <C_file,X>`); for a minimize problem it
+keeps `C_int = +C_file` (so `min <C_int,X> = min <C_file,X>`).  `recover_value`
+(`solve.c`) applies the matching output sign: `value = -(pObj/tau)` for maximize,
+`+(pObj/tau)` for minimize.  Before n1x the negate was UNCONDITIONAL, silently
+breaking minimize (it returned `-(max <C_file,X>)`); the all-maximize golden suite
+could not catch it.  CAVEAT: Layer-1 certification (§5.4/§5.5, `arbsdp_certify`)
+is still written for the max problem and is NOT yet minimize-aware (bead
+arb-prec-IPM-fjw); only the SOLVE path is minimize-correct.
+
 ### 1.3 Block-diagonal structure
 
 Constraint matrices A_i and cost matrices C are block-diagonal:

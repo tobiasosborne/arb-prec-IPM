@@ -73,6 +73,18 @@ static int opt_number(const char *buf, size_t len, const char *key, char *num, s
     return num[0] != '\0';
 }
 
+/* Optional JSON boolean key (literal true/false). Sets *out to 1/0 and returns 1
+ * if the key is present with a recognized literal; returns 0 (leaving *out alone)
+ * if the key is absent. Fails loud only on a malformed literal. */
+static int opt_bool(const char *buf, size_t len, const char *key, int *out) {
+    const char *p = find_value(buf, len, key);
+    const char *end = buf + len;
+    if (!p) return 0;
+    if (p + 4 <= end && memcmp(p, "true", 4) == 0)  { *out = 1; return 1; }
+    if (p + 5 <= end && memcmp(p, "false", 5) == 0) { *out = 0; return 1; }
+    return 0; /* unrecognized literal -> treat as absent (default applies) */
+}
+
 /* Parse the known_gaps array: scan each {...} object for kind/reason/bead. */
 static void parse_gaps(const char *buf, size_t len, golden_case *c) {
     const char *p = find_value(buf, len, "known_gaps");
@@ -130,6 +142,8 @@ static int parse_provenance(const char *path, golden_case *c) {
     c->correctness_tol_digits = 0;
     c->expected_max_bits_per_digit = 1e9;
     c->expected_max_iters = INT_MAX;
+    c->maximize = 1; /* default: .dat-s problems are maximizations (io.c:62); the
+                      * provenance "maximize": false drives the minimize path (bead n1x) */
 
     char num[64];
     const char *np;
@@ -148,6 +162,7 @@ static int parse_provenance(const char *path, golden_case *c) {
     if (opt_number(buf, len, "correctness_tol_digits", num, sizeof num)) c->correctness_tol_digits = (int)strtol(num, NULL, 10);
     if (opt_number(buf, len, "expected_max_bits_per_digit", num, sizeof num)) c->expected_max_bits_per_digit = strtod(num, NULL);
     if (opt_number(buf, len, "expected_max_iters", num, sizeof num)) c->expected_max_iters = (int)strtol(num, NULL, 10);
+    opt_bool(buf, len, "maximize", &c->maximize); /* absent -> default 1 (unchanged) */
     opt_string(buf, len, "expected_status", c->expected_status, sizeof c->expected_status);
     parse_gaps(buf, len, c);
     free(buf);

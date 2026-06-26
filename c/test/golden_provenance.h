@@ -7,6 +7,7 @@ typedef struct {
     int    optimal_value_digits;
     int    m;
     int    nblocks;
+    int    maximize;                     /* 1=maximize (default), 0=minimize (bead n1x) */
     char   expected_status[32];          /* default "optimal" */
     int    target_digits;                /* default 15 */
     long   prec_cap;                     /* default 8192 */

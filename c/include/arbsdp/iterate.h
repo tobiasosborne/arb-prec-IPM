@@ -30,14 +30,20 @@
  * is negated)
  * ==========================================================================
  * libarbsdp's problem.h stores C VERBATIM from the .dat-s file (the user-facing
- * `max <C,X>` cost), unlike the TS SdpProblem which negates C at parse time for
- * its internal `min -<C,X>`.  To keep the internal minimization convention and
- * the residual/objective formulas matching the TS solver EXACTLY, this module
- * forms the internal cost block once at init:
+ * cost), unlike the TS SdpProblem which negates C at parse time for its internal
+ * `min -<C,X>`.  The internal loop ALWAYS MINIMIZES <C_int,X>; to make that
+ * minimization express the user's objective, this module forms the internal cost
+ * block once at init with the orientation that depends on the sense (MATH_SPEC
+ * §1.2, invariant 7, bead arb-prec-IPM-n1x):
  *
- *     C_int^b = -C_file^b          (so pObj = sum_b <C_int^b, X^b> = -<C_file,X>)
+ *     C_int^b = -C_file^b   when MAXIMIZE (the SDPA default): min<-C_file,X> = max
+ *     C_int^b = +C_file^b   when MINIMIZE (bead n1x):         min<+C_file,X> = min
  *
- * Then, byte-for-byte with HsdeNtSdpSolver.ts:371-407:
+ * recover_value (solve.c) applies the MATCHING output sign (maximize ? -pObj/tau
+ * : +pObj/tau), so the two together return the correct user value in both modes.
+ * (PRE-n1x C_int was negated UNCONDITIONALLY, so a minimize problem was solved as
+ * a maximize and recover_value returned -(max<C,X>) instead of min<C,X>.)  Then,
+ * byte-for-byte with HsdeNtSdpSolver.ts:371-407 (pObj = sum_b <C_int^b, X^b>):
  *
  *     r_p_i  =  sum_b <A_i^b, X^b>  -  b_i * tau               (primal, m-vector)
  *     r_d^b  =  sum_i y_i A_i^b  +  S^b  -  C_int^b * tau      (dual, per block)
@@ -46,10 +52,11 @@
  *     dObj   =  b^T y
  *     mu     =  (sum_b <X^b, S^b>  +  tau*kappa) / (totalConeDim + 1)
  *
- * Note r_g uses +b^T y - sum_b<C_int,X> - kappa; with C_int = -C_file this is the
- * spec's "-<C,X> + b^T y - kappa" (where the spec's C is the negated/internal C).
- * The user-facing optimum is recovered downstream as -(pObj/tau) for a maximize
- * problem (NOT this bead -- here we only carry the internal-form objectives).
+ * These formulas are identical in both senses; only the orientation of C_int (set
+ * once at init per the table above) differs.  The user-facing optimum is recovered
+ * downstream (solve.c recover_value) as -(pObj/tau) when maximize, +(pObj/tau)
+ * when minimize -- the matching output sign for C_int's orientation (NOT this
+ * module -- here we only carry the internal-form objectives).
  *
  * ==========================================================================
  * BLOCK LAYOUT
@@ -98,7 +105,8 @@ typedef struct {
     arb_t      tau;               /* primal homogenization scalar (> 0)        */
     arb_t      kappa;             /* dual homogenization scalar (> 0)          */
 
-    /* --- cached internal cost C_int^b = -C_file^b (sign convention above) --- */
+    /* --- cached internal cost C_int^b (= -C_file^b if maximize, else +C_file^b;
+     *     sign convention above, bead n1x) ----------------------------------- */
     arb_mat_t *C_int;             /* length nblocks                            */
 
     /* --- residual storage (filled by arbsdp_iterate_residuals) ------------- */
@@ -121,7 +129,8 @@ typedef struct {
 
 /*
  * arbsdp_iterate_init -- allocate the iterate for problem `p` and cache the
- * internal cost blocks C_int^b = -C_file^b at precision `prec`.  All iterate
+ * internal cost blocks C_int^b at precision `prec` (= -C_file^b when p->maximize,
+ * = +C_file^b when minimize; sign convention banner, bead n1x).  All iterate
  * variables (X, S, y, tau, kappa) are zeroed; tau, kappa are set to 1 (the HSDE
  * default, MATH_SPEC §3.9).  `p` is borrowed (not owned) and must outlive the
  * iterate.  Pair with arbsdp_iterate_clear.
