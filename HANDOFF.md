@@ -1,7 +1,16 @@
-# HANDOFF — arbsdp (2026-06-02)
+# HANDOFF — arbsdp (2026-08-19)
 
 Five-minute orientation for the next agent. **Read this, then `CLAUDE.md`, then
 `PRD.md` §2, then `docs/MATH_SPEC.md`.**
+
+## ACTIVE MANDATE (2026-08-19): remediate the full-source review findings
+
+A slow serial review of the entire C source (owner-requested, 2026-08-19) found
+no P0 rigor bug on any reachable path, but a cluster of **float64 idioms ported
+verbatim from the TS solver** that together cap the product's headline promise
+(many certified digits), one latent rigor trap, and substantial avoidable cost.
+Every finding is filed as a bead. **The remediation plan and its ordering are in
+"Review remediation plan (2026-08-19)" below — orchestrate from there.**
 
 ## Your mandate (from the owner)
 
@@ -326,6 +335,106 @@ containing the optimum for tr-bounded goldens. Remaining, roughly by value:
    **b32** (efficiency regression harness).
 7. **arb-prec-IPM-9tm (P3):** UB-B residual upper bound (ybar + primal PSD projection)
    for problems with a known dual bound but no finite trace bound.
+
+## Review remediation plan (2026-08-19) — the active work queue
+
+Full-source serial review (headers + all 14 `c/src/*.c`, cross-checked against
+MATH_SPEC; two suspicions verified by probe, one confirmed, one refuted and
+dropped). Verdict: architecture right, Layer-1 ball arithmetic genuinely careful
+(directed endpoints correct everywhere; no P0 on any reachable path). The golden
+targets (13–15 digits) sit just below the threshold where the worst findings
+bite — a textbook rule-6 situation. Findings, each filed as a bead:
+
+### The anchor finding
+
+- **qx4 (P1) — the convergence test runs in float64** (`convergence.c:107-135`,
+  `solve.c:275-289,303`; `precision.c:171` silently clamps target_digits at 300).
+  The purified gap is a difference of two doubles, quantized at ~1 ulp
+  (~2.2e-16 rel): above ~16 digits the stop decision is rounding-noise-driven —
+  the loop either overshoots μ far past target (how `min_eig_path_4` td=30
+  passes; wasted iterations, a hidden wdz driver) or fires early at true gap
+  ~1e-16 (the p68 class, papered over by the confirm gate, not fixed at source).
+  td>300 is a hard silent ceiling. Fix: all six flags + prstatus + soft-optimal
+  + achieved metric in arb midpoint arithmetic; tolerances from target_digits
+  with no double round-trip; MATH_SPEC §3.8 update. Acceptance: new td=50 and
+  td=120 goldens pass; iteration counts DROP at td=13–15; p68 discriminator
+  still bites. **Land FIRST — it changes stopping behavior, so every
+  performance re-baseline waits on it (wdz now depends on qx4).**
+
+### Phase 0 — close the traps (days; independent, ready now)
+
+- **agc (P1)** — certify.c never consults `p->maximize`: a minimize problem gets
+  a wrong-objective "rigorous" bracket silently (unreachable via CLI today, one
+  API caller away). One-line fail-loud guard now; real minimize certify stays fjw.
+- **0v1 (P1)** — `nt_gfactor_build` ignores `arb_mat_cho`'s return
+  (`direction.c:315`): silent garbage L poisons the corrector. Propagate as the
+  honest cone-exit → NUMERICAL.
+- **37w (P2)** — reader accepts `inf`/`nan` value tokens (verified by probe:
+  `arb_set_str` accepts them); reject non-finite in `decimal_is_valid`.
+- **zuf (P2, pre-existing)** — generate.wl FormatNum sign bug; quick, guards
+  golden trust.
+
+### Phase 2 — float64-idiom auditions (rule 3: measure, record the loser)
+
+- **pw1 (P2, dep 0v1)** — fixed absolute 1e-14 jitter on S before Cholesky
+  (`direction.c:307-315`) is comparable to/dominates λ_min(S)~μ in the endgame;
+  audition none-vs-relative (`||S||·2^(-prec/2)`) vs status quo.
+- **pp8 (P2)** — regularize.c constants (1e-12 lift, 1e-2/1e2 caps) are absolute
+  float64 defaults; the Schur system permanently carries a ≥1e-12 absolute lift.
+  Audition scale/precision-relative tiers.
+
+### Phase 3 — performance (after qx4 re-baseline)
+
+- **6b6 (P2, blocks ggj)** — constraint matrices re-parsed from decimal strings
+  O(m²·nb) per iteration (schur.c inner loops, apply_A/At ×2 per iter,
+  direction.c RHS loops, regularize.c diagnose on constant data). One-time
+  per-(solve,prec) materialization cache; fold in the redundant stall-probe
+  residual recompute (`solve.c:474` vs `:366`).
+- **czx (P2)** — ~11 Jacobi eighs per block per iteration (NT 2 + gfactor 1 +
+  4×psd_max_step×2); consolidate around one G-factor (W = GᵀG; TS computes
+  max-step from the Cholesky factor). Cuts ~8/11. Fold-in: eigh's silent
+  100-sweep cap → status. (Probe: eigh converges scale-invariantly, ~10 sweeps,
+  1.5 ms n=8/prec=256 — the suspected norm-dependent tolerance stall was
+  REFUTED by measurement.)
+- **nux (P2)** — audition iterative refinement on the Schur solve (reuse L);
+  standard in SDPA-GMP/SDPT3; likely the strongest wdz lever after qx4.
+- **1mm (P3)** — audition `arb_mat_approx_*` for the point-mode KKT solve vs
+  ball cho (ball cho fails-to-prove before approx stops being useful → premature
+  escalation).
+
+### Phase 4 — certificate tightness
+
+- **ml6 (P2)** — λ_min bisection tol `2^(-prec/2)·||A||` (`certify.c:414`): only
+  half of prec_c becomes certificate digits, and ~prec/2 O(n³) cho probes per
+  bound. Tighten toward `2^-(prec-O(log n))`; seed the bracket from a point
+  eigenvalue estimate (rigor unchanged).
+- **t0u (P3, dep qx4)** — dual refinement of y at prec_c before certification
+  (bounds hold for ANY y; tightens b^Ty cheaply; precursor to b24).
+- **ehz (P2, deps agc + qx4)** — extend test_golden to CERTIFY tr-bounded
+  goldens (the bracket half of rule 4 is currently not enforced per golden;
+  min_eig_path_4 excluded until fjw; add the td=50/120 goldens to this gate).
+
+### Hygiene (P3, mechanical)
+
+- **5ly** — ball comparisons where point-mode midpoint compares are meant
+  (iterate.c inf-norms, direction.c step min, regularize.c bumps).
+- **jhw** — load-bearing `assert()`s become silent garbage under NDEBUG
+  (`certify.c:380` found_hi, `io.c:483`).
+- Pre-existing, confirmed still open: **7o8** (memcheck gate unwired), **axm**,
+  **epic.1.1**.
+
+### Suggested execution order
+
+1. Phase 0 in any order (agc, 0v1, 37w, zuf) — one bead one commit each.
+2. **qx4** (the anchor), including the td=50/120 goldens.
+3. pw1 + pp8 auditions (direction quality), then 6b6 → czx → nux (perf, ratchet
+   provenance budgets down), ggj once 6b6 lands.
+4. ml6 → t0u → ehz (certificate tightness + gating).
+5. Hygiene beads opportunistically, each its own bead/commit (rule 13 — no
+   drive-bys).
+
+Everything above is beads-tracked; `bd ready` reflects the dependency wiring
+(wdz blocked on qx4, ggj on 6b6, ehz on agc+qx4, t0u on qx4, pw1 on 0v1).
 
 ## How to work here (non-negotiable — see CLAUDE.md)
 
