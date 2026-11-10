@@ -275,13 +275,20 @@ typedef struct {
  * [V, sv2] = eigh(MLXL); sv = sqrt(max(sv2, 1e-300));
  * G = diag(sqrt(sv)) * V^T * L^{-1}      (:140-156).
  * L^{-1} is obtained by solving L * invL = I (triangular).
+ *
+ * Returns 1 on success; 0 if arb_mat_cho fails to prove S + jitter*I PD at
+ * `prec` (bead arb-prec-IPM-0v1).  L is then undefined, so G/sv would be
+ * silent garbage poisoning S^{-1}, Rq and the corrector (CLAUDE.md rule 5):
+ * the caller must treat 0 as the honest cone-exit (bead b30 mechanism).  On a
+ * 0 return f->G (zeroed) and f->sv stay allocated -- nt_gfactor_clear frees them.
  */
-static void
+static int
 nt_gfactor_build(nt_gfactor *f, const arb_mat_t X, const arb_mat_t S, slong prec)
 {
     slong n = arb_mat_nrows(S);
     arb_mat_t Ssym, L, invL, Id, Xsym, Lt, LtX, MLXL, V, Vt, VtinvL;
     arb_ptr sv2;
+    int ok = 1;
 
     f->n = n;
     arb_mat_init(f->G, n, n);
@@ -312,7 +319,11 @@ nt_gfactor_build(nt_gfactor *f, const arb_mat_t X, const arb_mat_t S, slong prec
             arb_add(arb_mat_entry(Ssym, i, i), arb_mat_entry(Ssym, i, i), jit, prec);
         arb_clear(jit);
     }
-    arb_mat_cho(L, Ssym, prec);              /* L lower-triangular, L L^T = Ssym */
+    /* L lower-triangular, L L^T = Ssym.  A failed factor -> honest cone-exit. */
+    if (!arb_mat_cho(L, Ssym, prec)) {
+        ok = 0;
+        goto cleanup;
+    }
 
     /* invL = L^{-1} via L * invL = I (triangular solve, unit-diag = 0). */
     arb_mat_one(Id);
@@ -356,6 +367,7 @@ nt_gfactor_build(nt_gfactor *f, const arb_mat_t X, const arb_mat_t S, slong prec
         arb_clear(s);
     }
 
+cleanup:
     _arb_vec_clear(sv2, n);
     arb_mat_clear(Ssym);
     arb_mat_clear(L);
@@ -368,6 +380,7 @@ nt_gfactor_build(nt_gfactor *f, const arb_mat_t X, const arb_mat_t S, slong prec
     arb_mat_clear(V);
     arb_mat_clear(Vt);
     arb_mat_clear(VtinvL);
+    return ok;
 }
 
 static void
@@ -545,6 +558,7 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
     const arbsdp_problem *p = it->prob;
     const int m = it->m, nb = it->nblocks;
     int ok = 1;
+    int gfactor_ok = 1;   /* 0v1: every block's G-factor Cholesky succeeded */
 
     assert(d->m == m && d->nblocks == nb);
 
@@ -579,7 +593,9 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
         arb_mat_init(dX2[b], n, n);
         arb_mat_init(dS2[b], n, n);
         arb_mat_init(ExC[b], n, n);
-        nt_gfactor_build(&F[b], it->X[b], it->S[b], prec);
+        /* Build EVERY block (even after a failure) so cleanup can clear F[b]. */
+        if (!nt_gfactor_build(&F[b], it->X[b], it->S[b], prec))
+            gfactor_ok = 0;
     }
 
     arb_mat_init(M, m, m);
@@ -593,6 +609,16 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
     arb_init(dtau_aff); arb_init(dkap_aff); arb_init(eta); arb_init(sigma_mu);
     arb_init(Etau); arb_init(dtau_num);
     arb_init(alpha_raw); arb_init(big);
+
+    /* honest cone-exit (bead 0v1, the b30 mechanism): a G-factor Cholesky that
+     * fails to prove S PD leaves G/sv undefined -> NUMERICAL, never a corrector
+     * built on garbage.  Checked after all inits so cleanup frees everything. */
+    if (!gfactor_ok) {
+        d->factor_calls = 0;             /* the Schur factor was never invoked */
+        d->factor_attempts = 0;
+        ok = 0;
+        goto cleanup;
+    }
 
     /* ---------------------------------------------------------------------
      * Caches W*C_int*W and W*r_d*W per block (:524-538).  (W*A*W is rebuilt

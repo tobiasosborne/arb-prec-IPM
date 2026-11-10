@@ -228,9 +228,11 @@ void arbsdp_direction_clear(arbsdp_direction *d);
  * `sigma`, `mu_aff`, and the factor_attempts / factor_calls diagnostics.
  *
  * Returns 1 on success; 0 if the Schur factor failed even fully regularized
- * (arbsdp_factor_with_reg returned 0) -- reported honestly (CLAUDE.md rule 5);
- * the direction outputs are then undefined and the caller / precision controller
- * must escalate.
+ * (arbsdp_factor_with_reg returned 0), if a cone op is untrustworthy (the b30
+ * strict-PD gate in arbsdp_psd_max_step), or if a per-block NT G-factor Cholesky
+ * of S fails to prove PD (bead 0v1; factor_calls/attempts are then 0) --
+ * reported honestly (CLAUDE.md rule 5); the direction outputs are then undefined
+ * and the caller / precision controller must escalate.
  *
  * d->m / d->nblocks must match it->m / it->nblocks (asserted).
  * POINT MODE: all outputs are midpoints; radii not trusted.

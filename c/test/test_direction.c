@@ -483,6 +483,109 @@ test_mu_decreases(void)
     arbsdp_problem_clear(&p);
 }
 
+/* ------------------------------------------------------------------------- *
+ * G-FACTOR CHOLESKY FAILURE (bead arb-prec-IPM-0v1).  nt_gfactor_build      *
+ * factors L L^T = S + 1e-14 I with arb_mat_cho; if that factorization fails  *
+ * to prove PD, L is undefined and poisons S^{-1}, Rq and the whole corrector. *
+ * The contract (CLAUDE.md rule 5): arbsdp_direction_compute returns 0 (the    *
+ * honest cone-exit -> solve.c NUMERICAL -> controller escalates), never a     *
+ * direction built from a garbage factor.                                     *
+ *                                                                            *
+ * Choosing the discriminating input (rule 8).  An INDEFINITE S is NOT a       *
+ * discriminator: the affine step's arbsdp_psd_max_step(S, .) strict-PD gate   *
+ * (bead b30) already rejects it, so compute returns 0 even with the cho       *
+ * return ignored.  For a radius-cleared S the strict-PD gate (cond(S) <       *
+ * 2^(prec/2)) and a ball Cholesky that loses only ~cond*2^-prec leave no       *
+ * practical window either.  The input that reaches the unchecked call is      *
+ * exactly the bead's failure mode -- cho cannot PROVE PD while the eig-based  *
+ * gates pass: S = xiD*I (midpoint, strictly PD, Jacobi eigh sees a diagonal   *
+ * matrix and skips the zero-midpoint off-diagonals, so every gate passes)    *
+ * with off-diagonal radius 2*xiD, so the 2x2 Schur complement                *
+ * xiD - [0 +/- 2xiD]^2/xiD contains negatives and arb_mat_cho returns 0.     *
+ * MUTATION: ignoring the arb_mat_cho return again turns this check red.      *
+ * ------------------------------------------------------------------------- */
+static void
+test_gfactor_cho_failure(void)
+{
+    arbsdp_problem p;
+    arbsdp_iterate it;
+    arbsdp_regstate rs;
+    arbsdp_direction d;
+    arb_mat_t *W;
+    arb_t xiP, xiD;
+    mag_t rad;
+    int ok, rc;
+
+    arbsdp_problem_init(&p);
+    rc = arbsdp_read_sdpa(&p, GOLDEN_DIR "/sdp_sqrt2/sdp_sqrt2.dat-s");
+    CHECK(rc == 0, "gfactor_cho_failure: failed to read sdp_sqrt2.dat-s");
+    if (rc != 0) { arbsdp_problem_clear(&p); return; }
+
+    arbsdp_iterate_init(&it, &p, PREC);
+    arbsdp_regstate_init(&rs, PREC);
+    arbsdp_direction_init(&d, &p);
+    arb_init(xiP); arb_init(xiD);
+    mag_init(rad);
+
+    /* strictly-feasible start (as test_mu_decreases); residuals + W from the
+     * clean midpoint iterate, so the Schur factor itself succeeds. */
+    initial_scale(xiP, xiD, &p, PREC);
+    for (int b = 0; b < it.nblocks; b++) {
+        slong n = it.block_n[b];
+        arb_mat_zero(it.X[b]);
+        arb_mat_zero(it.S[b]);
+        for (slong i = 0; i < n; i++) {
+            arb_set(arb_mat_entry(it.X[b], i, i), xiP);
+            arb_set(arb_mat_entry(it.S[b], i, i), xiD);
+        }
+    }
+    for (int i = 0; i < it.m; i++) arb_zero(&it.y[i]);
+    arb_one(it.tau);
+    arb_one(it.kappa);
+    arbsdp_iterate_residuals(&it, PREC);
+
+    W = flint_malloc((size_t) it.nblocks * sizeof *W);
+    for (int b = 0; b < it.nblocks; b++) {
+        slong n = it.block_n[b];
+        arb_mat_init(W[b], n, n);
+        arbsdp_nt_scaling(W[b], it.X[b], it.S[b], PREC);
+    }
+
+    /* Widen S's off-diagonals to [0 +/- 2*xiD]: ball cho of S must fail. */
+    arb_get_mag(rad, xiD);
+    mag_mul_2exp_si(rad, rad, 1);
+    for (int b = 0; b < it.nblocks; b++) {
+        slong n = it.block_n[b];
+        for (slong i = 0; i < n; i++)
+            for (slong j = 0; j < n; j++)
+                if (i != j)
+                    mag_set(arb_radref(arb_mat_entry(it.S[b], i, j)), rad);
+    }
+    {
+        /* precondition: the input really defeats arb_mat_cho (rule 8). */
+        arb_mat_t Lc;
+        arb_mat_init(Lc, it.block_n[0], it.block_n[0]);
+        CHECK(arb_mat_cho(Lc, it.S[0], PREC) == 0,
+              "gfactor_cho_failure: precondition -- arb_mat_cho(S) must fail");
+        arb_mat_clear(Lc);
+    }
+
+    ok = arbsdp_direction_compute(&d, &it, (const arb_mat_t *) W, &rs, PREC);
+    CHECK(ok == 0,
+          "gfactor_cho_failure (0v1): a failed G-factor Cholesky must make "
+          "direction_compute return 0 (honest cone-exit), not a garbage direction");
+    printf("  gfactor_cho_failure: direction_compute returned %d (expect 0)\n", ok);
+
+    for (int b = 0; b < it.nblocks; b++) arb_mat_clear(W[b]);
+    flint_free(W);
+    mag_clear(rad);
+    arb_clear(xiP); arb_clear(xiD);
+    arbsdp_direction_clear(&d);
+    arbsdp_regstate_clear(&rs);
+    arbsdp_iterate_clear(&it);
+    arbsdp_problem_clear(&p);
+}
+
 int
 main(void)
 {
@@ -491,6 +594,7 @@ main(void)
     test_sigma_clip();
     test_clip_step();
     test_mu_decreases();
+    test_gfactor_cho_failure();
 
     if (failures != 0) {
         fprintf(stderr, "test_direction: %d check(s) FAILED\n", failures);
