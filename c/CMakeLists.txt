@@ -141,6 +141,34 @@ target_link_libraries(test_certify PRIVATE arbsdp)
 
 add_test(NAME test_certify COMMAND test_certify)
 
+# NDEBUG twin of test_certify (bead arb-prec-IPM-jhw): the SAME test source,
+# compiled together with the library sources under -DNDEBUG, so every assert()
+# in src/ is compiled out.  It proves the certify kernels do not rely on an
+# assert for control flow: a load-bearing assert would turn into silent garbage
+# here (CLAUDE.md rule 5) and a rigor/tightness CHECK would go red.  Static
+# compile of ${ARBSDP_SOURCES}; it does not link the Debug libarbsdp.
+add_executable(test_certify_ndebug test/test_certify.c ${ARBSDP_SOURCES})
+
+target_include_directories(test_certify_ndebug
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_certify_ndebug PRIVATE NDEBUG)
+
+# Locals read only inside assert() become set-but-unused under NDEBUG (e.g.
+# io.c's block size n); that is the expected NDEBUG artifact, not a defect, and
+# the Debug build keeps the warning live for real cases.
+target_compile_options(test_certify_ndebug PRIVATE ${FLINT_CFLAGS_OTHER}
+    -Wno-unused-but-set-variable -Wno-unused-variable)
+
+target_link_directories(test_certify_ndebug PRIVATE ${FLINT_LIBRARY_DIRS})
+
+target_link_libraries(test_certify_ndebug PRIVATE flint ${FLINT_LIBRARIES} mpfr gmp m)
+
+add_test(NAME test_certify_ndebug COMMAND test_certify_ndebug)
+
 add_executable(test_ntscaling test/test_ntscaling.c)
 
 target_include_directories(test_ntscaling

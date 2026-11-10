@@ -513,11 +513,16 @@ arbsdp_problem_block_mat(arb_mat_t out, const arbsdp_problem *p, int matno,
         int j = mb->entries[e].j;
         /* arb_set_str yields a correctly-rounded enclosure of the exact decimal
          * at `prec` bits -- a true ball, so rigor is preserved.  The string was
-         * validated at parse time, so parse failure here is unexpected; assert
-         * it (fail loud rather than silently zero). */
-        int bad = arb_set_str(v, mb->entries[e].value, prec);
-        assert(bad == 0);
-        (void) bad;
+         * validated at parse time, so parse failure here means corrupted problem
+         * data.  Fail loud UNCONDITIONALLY (bead arb-prec-IPM-jhw): this was an
+         * assert, which vanishes under NDEBUG and would let a garbage entry
+         * flow silently into the solve and the certificate (CLAUDE.md rule 5). */
+        if (arb_set_str(v, mb->entries[e].value, prec) != 0) {
+            fprintf(stderr, "arbsdp: block_mat: entry (matno %d, block %d, "
+                    "%d, %d) failed to parse: \"%s\"\n", matno, block + 1,
+                    i + 1, j + 1, mb->entries[e].value);
+            flint_abort();
+        }
 
         /* Duplicates accumulate (matches SdpProblem.ts `M += v`). */
         arb_add(arb_mat_entry(out, i, j), arb_mat_entry(out, i, j), v, prec);

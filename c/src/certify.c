@@ -11,6 +11,7 @@
  */
 
 #include <assert.h>
+#include <stdio.h>
 
 #include <flint/arb.h>
 #include <flint/arb_mat.h>
@@ -375,9 +376,19 @@ arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
                 arb_set(s_lo, s_try);        /* s_try still passes: advance s_lo */
                 arb_mul_2exp_si(s_try, s_try, 1); /* double */
             }
-            /* Mathematically a failure MUST appear (lambda_min is finite); the
-             * cap is only a fail-loud guard (CLAUDE.md rule 5). */
-            assert(found_hi && "lambda_min: PD-growth never found a failing shift");
+            /* The cap CAN be exhausted: lambda_min > 2^200 * max(1,|g|) happens
+             * for badly scaled A (e.g. [[2^300,2^300],[2^300,2^700]], g = 0).
+             * This was an assert -- under NDEBUG the bisection then ran with an
+             * unset fence (bead arb-prec-IPM-jhw).  Real control flow: take the
+             * Gershgorin UPPER bound as the fence.  It is >= lambda_max >=
+             * lambda_min (Gershgorin 1931), so the bracket still contains
+             * lambda_min; bisection moves s_lo ONLY on a successful ball
+             * Cholesky, so the returned d stays a theorem whatever s_hi is. */
+            if (!found_hi) {
+                arbsdp_gershgorin_upper_bound(s_hi, A, prec);
+                if (arb_lt(s_hi, s_lo))      /* cannot happen (s_lo <= lmin); */
+                    arb_set(s_hi, s_lo);     /* keep width >= 0 regardless    */
+            }
         }
     } else {
         /* s = 0 FAILS: A is indefinite or on the PSD boundary (lambda_min <= 0).
@@ -668,9 +679,15 @@ assemble_bty(arb_t out, const arbsdp_problem *p, arb_srcptr y_ext, slong prec)
     {
         arb_ptr bvec = _arb_vec_init(m);
         for (int i = 0; i < m; i++) {
-            int rc = arbsdp_problem_b(&bvec[i], p, i, prec);
-            assert(rc == 0 && "assemble_bty: b_i failed to parse");
-            (void) rc;
+            /* b_i was validated at parse time; a failure here means corrupted
+             * problem data.  Unconditional fail-loud (bead arb-prec-IPM-jhw):
+             * an assert vanishes under NDEBUG and a garbage b_i would silently
+             * corrupt b^T y -- a wrong certificate (CLAUDE.md rule 5). */
+            if (arbsdp_problem_b(&bvec[i], p, i, prec) != 0) {
+                fprintf(stderr, "arbsdp: assemble_bty: b_%d failed to parse\n",
+                        i + 1);
+                flint_abort();
+            }
         }
         /* out = sum_i b[i] * y_ext[i], one rounding (arb_dot, subtract = 0). */
         arb_dot(out, NULL, 0, bvec, 1, y_ext, 1, m, prec);
@@ -1048,9 +1065,12 @@ arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
         arb_init(beta);
         arf_init(beta_lo);
         for (int b = 0; b < nb; b++) {
-            int rc = arbsdp_problem_b(beta, p, covered[b] - 1, prec); /* b is 0-indexed */
-            assert(rc == 0 && "primal_lower_bound: beta_b failed to parse");
-            (void) rc;
+            /* A parse failure (assert-only before bead jhw) makes the bound
+             * honestly UNAVAILABLE, never computed from a garbage beta_b. */
+            if (arbsdp_problem_b(beta, p, covered[b] - 1, prec) != 0) {
+                applicable = 0;
+                break;
+            }
             arb_get_lbound_arf(beta_lo, beta, prec);
             if (arf_sgn(beta_lo) < 0) { applicable = 0; break; }
         }
@@ -1083,11 +1103,10 @@ arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
             arb_mat_init(C_b, sz, sz);
             arbsdp_problem_block_mat(C_b, p, /*matno=*/0, /*block=*/b, prec); /* C_file^b */
 
-            int rc = arbsdp_problem_b(beta_b, p, covered[b] - 1, prec); /* beta_b   */
-            assert(rc == 0 && "primal_lower_bound: beta_b failed to parse");
-            (void) rc;
-
-            if (block_rayleigh_lb(lb_b, C_b, beta_b, it->X[b], prec)) {
+            /* parse failure -> whole bound unavailable (bead jhw; was assert) */
+            if (arbsdp_problem_b(beta_b, p, covered[b] - 1, prec) != 0) {
+                ok = 0;
+            } else if (block_rayleigh_lb(lb_b, C_b, beta_b, it->X[b], prec)) {
                 arb_add(acc, acc, lb_b, prec);   /* sum_b beta_b R(v_b)  (ball)     */
             } else {
                 ok = 0;                          /* den guard: whole bound off      */

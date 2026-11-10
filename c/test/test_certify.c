@@ -514,6 +514,68 @@ test_eig_crosscheck(void)
     arb_mat_clear(Q);
 }
 
+/* ----- Step 5b: PD-growth exhaustion (bead arb-prec-IPM-jhw) -------------- *
+ * The PD branch of arbsdp_lambda_min_lower_bound doubles s from max(1,|g|)
+ * (g = Gershgorin floor) for a bounded number of steps looking for a failing
+ * shift.  If lambda_min exceeds 2^cap * max(1,|g|) no failure appears.  This
+ * used to be guarded ONLY by assert(found_hi): under NDEBUG the bisection then
+ * ran on an uninitialized s_hi.  The control flow must now handle it and still
+ * return a THEOREM d <= lambda_min.
+ *
+ * Fixture: A = [[a, a],[a, c]], a = 2^300, c = 2^700.  Gershgorin floor
+ * g = min(a - a, c - a) = 0 (so growth starts at 1), while
+ *   lambda_min = (a+c)/2 - sqrt(((c-a)/2)^2 + a^2)  ~= a (1 - a/c) ~ 2^300,
+ * far above 2^200: the growth loop exhausts.  Checks: the call returns (no
+ * abort), d <= lambda_min (computed in arb, CLAUDE rule 8), and d >= 2^199 (the
+ * last proven growth shift; never regress below a shift already proven). */
+static void
+test_lambda_min_growth_exhausted(void)
+{
+    const slong prec = 1024;
+    arb_mat_t A;
+    arb_t d, a, c, t, u, lmin, floor199;
+    arf_t du, ll;
+
+    arb_mat_init(A, 2, 2);
+    arb_init(d); arb_init(a); arb_init(c); arb_init(t); arb_init(u);
+    arb_init(lmin); arb_init(floor199);
+    arf_init(du); arf_init(ll);
+
+    arb_one(a); arb_mul_2exp_si(a, a, 300);
+    arb_one(c); arb_mul_2exp_si(c, c, 700);
+    arb_set(arb_mat_entry(A, 0, 0), a);
+    arb_set(arb_mat_entry(A, 0, 1), a);
+    arb_set(arb_mat_entry(A, 1, 0), a);
+    arb_set(arb_mat_entry(A, 1, 1), c);
+
+    /* exact lmin enclosure at high prec */
+    arb_sub(t, c, a, 4 * prec);
+    arb_mul_2exp_si(t, t, -1);
+    arb_sqr(t, t, 4 * prec);
+    arb_sqr(u, a, 4 * prec);
+    arb_add(t, t, u, 4 * prec);
+    arb_sqrt(t, t, 4 * prec);
+    arb_add(lmin, a, c, 4 * prec);
+    arb_mul_2exp_si(lmin, lmin, -1);
+    arb_sub(lmin, lmin, t, 4 * prec);
+
+    arbsdp_lambda_min_lower_bound(d, A, prec);
+
+    arb_get_ubound_arf(du, d, prec);
+    arb_get_lbound_arf(ll, lmin, 4 * prec);
+    CHECK(arf_is_finite(du) && arf_cmp(du, ll) <= 0,
+          "growth-exhausted: d must be finite and <= lambda_min (rigor)");
+    arb_one(floor199); arb_mul_2exp_si(floor199, floor199, 199);
+    arb_get_lbound_arf(du, d, prec);
+    CHECK(arf_cmp(du, arb_midref(floor199)) >= 0,
+          "growth-exhausted: d must not drop below the last proven shift 2^199");
+
+    arf_clear(du); arf_clear(ll);
+    arb_clear(d); arb_clear(a); arb_clear(c); arb_clear(t); arb_clear(u);
+    arb_clear(lmin); arb_clear(floor199);
+    arb_mat_clear(A);
+}
+
 /* ----- Step 6: arbsdp_dual_residual ENCLOSURE (bead b18) ------------------ *
  * Z[b] = C[b] - sum_i y_i A_i[b] must be a true ball ENCLOSURE (CLAUDE.md rule
  * 2): each returned entry's ball must CONTAIN the independently-computed exact
@@ -825,6 +887,7 @@ main(void)
     test_lambda_min_bracket_coarse();
     test_lambda_min_bisection();
     test_eig_crosscheck();
+    test_lambda_min_growth_exhausted();
     test_dual_residual();
     test_apriori();
 
