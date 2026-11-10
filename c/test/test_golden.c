@@ -330,6 +330,11 @@ int main(void) {
     /* The gate fails IFF any class is FAIL or XPASS, or any problem hard-failed
      * to read.  PASS and XFAIL are green. */
     int gate_fail = (t.fail > 0) || (t.xpass > 0) || (hard_fail > 0);
+
+    /* Free FLINT's thread-local caches (fmpz pool, arf scratch, registered
+     * cleanup hooks) so valgrind reports no possibly-lost / reachable
+     * blocks at exit (bead arb-prec-IPM-7o8 memcheck gate). */
+    flint_cleanup_master();
     if (gate_fail) {
         printf("\n  GATE: FAIL -- ");
         if (hard_fail > 0)

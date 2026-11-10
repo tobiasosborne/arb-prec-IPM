@@ -769,6 +769,11 @@ main(void)
     test_feasible_no_misfire_battery();
     test_minimize_refused();
 
+    /* Free FLINT's thread-local caches (fmpz pool, arf scratch, registered
+     * cleanup hooks) so valgrind reports no possibly-lost / reachable
+     * blocks at exit (bead arb-prec-IPM-7o8 memcheck gate). */
+    flint_cleanup_master();
+
     if (failures == 0) {
         printf("\nAll test_farkas checks passed.\n");
         return EXIT_SUCCESS;

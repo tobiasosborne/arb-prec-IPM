@@ -624,6 +624,11 @@ main(void)
     test_p68_victims_confirmed();
     test_target_beyond_300_digits();
 
+    /* Free FLINT's thread-local caches (fmpz pool, arf scratch, registered
+     * cleanup hooks) so valgrind reports no possibly-lost / reachable
+     * blocks at exit (bead arb-prec-IPM-7o8 memcheck gate). */
+    flint_cleanup_master();
+
     if (failures != 0) {
         fprintf(stderr, "\ntest_precision: %d check(s) FAILED\n", failures);
         return EXIT_FAILURE;

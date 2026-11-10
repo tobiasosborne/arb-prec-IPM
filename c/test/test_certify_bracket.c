@@ -1162,6 +1162,11 @@ int main(void)
     test_separable_primal_tight(cases, n);
     test_detector_rejects_coupled(cases, n);
 
+    /* Free FLINT's thread-local caches (fmpz pool, arf scratch, registered
+     * cleanup hooks) so valgrind reports no possibly-lost / reachable
+     * blocks at exit (bead arb-prec-IPM-7o8 memcheck gate). */
+    flint_cleanup_master();
+
     if (failures == 0) {
         printf("\ntest_certify_bracket: ALL PASS\n");
         return EXIT_SUCCESS;

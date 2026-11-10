@@ -372,6 +372,11 @@ main(void)
     test_p5_firing_iterate();
     test_feasible_regression();
 
+    /* Free FLINT's thread-local caches (fmpz pool, arf scratch, registered
+     * cleanup hooks) so valgrind reports no possibly-lost / reachable
+     * blocks at exit (bead arb-prec-IPM-7o8 memcheck gate). */
+    flint_cleanup_master();
+
     if (failures == 0) {
         printf("\nAll test_infeasible checks passed.\n");
         return 0;

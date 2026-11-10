@@ -21,8 +21,11 @@ add_compile_options(
 )
 
 if(ENABLE_ASAN)
-    add_compile_options(-fsanitize=address,undefined)
-    add_link_options(-fsanitize=address,undefined)
+    # -fno-sanitize-recover=all: a UBSan finding ABORTS the test (non-zero exit)
+    # instead of printing and continuing, so UB fails ctest like an ASan error
+    # or an LSan leak does (bead arb-prec-IPM-7o8).
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
+    add_link_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
 endif()
 
 # ---- Dependencies --------------------------------------------------------
@@ -94,7 +97,25 @@ target_include_directories(arbsdp_cli
 target_link_libraries(arbsdp_cli PRIVATE arbsdp m)
 
 # ---- Tests ---------------------------------------------------------------
-enable_testing()
+# Memory-check gate (bead arb-prec-IPM-7o8): `ctest -T memcheck` runs every test
+# under valgrind memcheck and FAILS a test (exit 1) on any memory error or any
+# DEFINITELY / INDIRECTLY lost block -- the CLAUDE.md "zero leaks" merge gate,
+# machine-enforced.  FLINT's thread-local caches (the fmpz/mpz recycling pool,
+# arf_div scratch, registered cleanup hooks) show up only as "possibly lost" /
+# "still reachable", never as definite/indirect, so they cannot trip the gate;
+# tests additionally call flint_cleanup_master() at exit so the logs stay
+# clean.  No suppression file is needed (none of our findings is suppressed).
+# --trace-children is NOT used: ctest gives every process the same --log-file,
+# so each traced child (sh, arbsdp, python3) truncates the parent's log.  The
+# CLI process is memchecked instead by the direct test cli_memcheck_smoke
+# below.  include(CTest) must come after MEMORYCHECK_* are set; it calls
+# enable_testing().  CTEST_TARGETS_ADDED suppresses the dashboard targets
+# (Experimental, Nightly, ...), which this project does not use.
+find_program(MEMORYCHECK_COMMAND valgrind)
+set(MEMORYCHECK_COMMAND_OPTIONS
+    "--leak-check=full --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect --error-exitcode=1")
+set_property(GLOBAL PROPERTY CTEST_TARGETS_ADDED 1)
+include(CTest)
 
 add_executable(test_version test/test_version.c)
 
@@ -463,3 +484,32 @@ target_compile_definitions(test_pcache
 target_link_libraries(test_pcache PRIVATE arbsdp)
 
 add_test(NAME test_pcache COMMAND test_pcache)
+# cli_memcheck_smoke (bead arb-prec-IPM-7o8): the `arbsdp` binary run DIRECTLY
+# (read -> adaptive solve -> certify -> JSON, the full CLI pipeline) so that
+# `ctest -T memcheck` and the ASan configuration check the CLI process itself;
+# test_cli only reaches it through popen, which memcheck does not follow.
+add_test(NAME cli_memcheck_smoke
+    COMMAND arbsdp_cli solve
+        ${CMAKE_CURRENT_SOURCE_DIR}/../golden/max_eigenvalue_2x2/max_eigenvalue_2x2.dat-s
+        --trace-bound 1)
+set_tests_properties(cli_memcheck_smoke PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"certificate\": {\"status\": \"optimal\"")
+
+# Label the two long golden sweeps "slow" (bead arb-prec-IPM-7o8).  Under
+# valgrind they dominate (measured: test_golden 382 s vs 5.8 s native,
+# test_certify_bracket 847 s vs 15.7 s), so the routine memcheck gate is
+#     ctest --test-dir c/build -T memcheck -LE slow
+# and the full sweep (`ctest -T memcheck`, ~21 min serial) is the
+# occasional/overnight run.  Both slow tests stay leak-gated on every run of
+# the ASan configuration (LeakSanitizer, below).
+set_tests_properties(test_golden test_certify_bracket PROPERTIES LABELS slow)
+
+# ASan gate (bead arb-prec-IPM-7o8): pin the sanitizer runtime options so the
+# gate does not depend on the caller's environment -- LeakSanitizer ON (exit
+# non-zero on any leak at exit), UBSan stacks printed.  Inherited by the CLI
+# that test_cli spawns.
+if(ENABLE_ASAN)
+    get_property(ARBSDP_ALL_TESTS DIRECTORY PROPERTY TESTS)
+    set_tests_properties(${ARBSDP_ALL_TESTS} PROPERTIES ENVIRONMENT
+        "ASAN_OPTIONS=detect_leaks=1;UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1")
+endif()

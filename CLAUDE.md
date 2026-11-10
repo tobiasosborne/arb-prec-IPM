@@ -257,8 +257,13 @@ ctest --test-dir c/build --output-on-failure
 cmake --build c/build --target test_certify && ./c/build/test_certify
 
 # Memory-clean gate (required before merge)
-ctest --test-dir c/build -T memcheck        # valgrind
-# or build with -DENABLE_ASAN=ON and run the suite
+# (fails on any memcheck error or definitely/indirectly lost block)
+ctest --test-dir c/build -T memcheck -LE slow   # valgrind, ~20 s
+ctest --test-dir c/build -T memcheck            # full, incl. label "slow"
+                                                #   (test_golden, test_certify_bracket): ~21 min serial
+# AND the ASan+UBSan+LSan config (any finding fails the test):
+cmake -S c -B c/build-asan -DENABLE_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build c/build-asan && ctest --test-dir c/build-asan
 
 # CLI smoke test
 ./c/build/arbsdp solve golden/truss1.dat-s --prec 256
