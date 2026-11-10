@@ -257,6 +257,51 @@ Useful identities verified by construction:
 
 The TS implementation in `buildNtFactor` (HsdeNtSdpSolver.ts:126-163) adds a
 diagonal jitter of 1e-14 before the Cholesky to handle near-singular S.
+**libarbsdp adds no jitter** (bead arb-prec-IPM-pw1, §3.3.1).
+
+#### 3.3.1 Audition: the S jitter in the G-factor (bead arb-prec-IPM-pw1)
+
+The G-factor feeds the corrector: S^{-1} = G^T diag(1/sv) G in the centering
+term sigma*mu*S^{-1}, and G in Rq. Near a strictly complementary rank-deficient
+optimum lambda_min(S) ~ mu, so an ABSOLUTE jitter j dominates the small
+eigenvalue once mu < j: the corrector is built for S + jI, not S.
+
+Trace (sdp_sqrt2, prec 2048, tol 1e-50, pre-h62 code): with j = 1e-14 the step
+length falls to 0.95 / 0.76 at mu ~ 1e-14 and, after mu ~ 1e-28, cycles
+alpha = 0.9999 / 0.3 / 0.04 with sigma pinned at 0.9; the primal residual
+stalls near 1e-26 while mu creeps down (260 iterations). With j = 0, mu falls by
+exactly 1e-4 per iteration at alpha = 0.9999 to 5e-68 (22 iterations).
+
+Candidates (corpus = 26 goldens via `test_golden`, measured on top of the h62
+midpoint fix, §3.10.1; iterations / final_prec of the returned solve):
+
+| Candidate | Corpus iters (sum) | sum log2 final_prec | sdp_sqrt2_td50 | max_eig_path_4_td50 | min_eig_path_4_td120 | Gate |
+|-----------|-------------------:|--------------------:|----------------|---------------------|----------------------|------|
+| status quo j = 1e-14 (TS :129) | 445 | 194 | 260 / 1024 | 17 / 512 | 35 / 1024 | pass |
+| **none (j = 0)** | **195** | 195 | **22 / 1024** | 16 / 512 | 32 / 2048 | pass |
+| j = ‖S‖_F 2^(-prec/2) | 194 | 196 | 22 / 1024 | 15 / 1024 | 32 / 2048 | FAIL (max_eig_path_4_td50 LIMIT at cap 1024) |
+| j = ‖S‖_F 2^(-prec/4) | 226 | 196 | 22 / 1024 | 17 / 512 | 32 / 2048 | pass |
+
+Decision: **none**. It removes the 1e-14 floor that made sdp_sqrt2_td50 crawl
+(260 -> 22 iterations; disparate_scale_sqrt2 20 -> 14, min_eig_path_4 12 -> 10,
+min_eig_path_4_td120 35 -> 32), and S is strictly PD at every interior iterate,
+so the Cholesky of the exact S succeeds; when it cannot be proven PD at this
+precision, `nt_gfactor_build` returns the honest cone-exit (bead 0v1) and the
+controller escalates. No gfactor Cholesky failure occurred anywhere in the
+corpus with or without the jitter (counted on the pre-h62 code: the 25 resp.
+13 NUMERICAL exits were all `iterate invalid` or `nt_scaling not PD`). Losers: the status quo (absolute, dominates
+lambda_min(S) below mu ~ 1e-14); 2^(-prec/4) (at 128 bits it is ~2e-10 ‖S‖,
+again above lambda_min(S) in the endgame: +31 iterations, e.g. the diag_weight
+family 5 -> 8); 2^(-prec/2) ties on iterations but is not needed.
+
+Measured cost, recorded honestly: min_eig_path_4_td120 moves 1024 -> 2048 bits
+(still the pre-h62 value, within its budget). And max_eig_path_4_td50 at 512
+bits is on a knife edge: the 2^(-prec/2) jitter (an O(2^-256) change) flips it
+to a 512-bit NUMERICAL exit. The cause is an open direction-numerics defect,
+not the jitter: near a rank-deficient optimum the primal Newton-equation
+residual of the computed direction grows like ~mu^-3 times unit roundoff
+(sdp_sqrt2 at 512 bits: 1e-37 at mu = 5e-44 -> 1e-11 at mu = 5e-52). The
+absolute jitter and the 1e-12 Schur lift (§4.1.1) partly damp it by accident.
 
 **Layer 0 NOTE:** This computation uses approximate (point-mode) eigendecomposition
 via Jacobi iteration (PsdCone.ts:63-130, `eighJacobi`).  Inexactness is irrelevant

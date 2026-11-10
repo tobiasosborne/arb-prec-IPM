@@ -4,7 +4,9 @@
   "description": "Same problem as golden/sdp_sqrt2 (data file identical apart from the header comment): 2x2 SDP max x_12 s.t. x_11=1, x_22=2, X 2x2 PSD. opt = sqrt(2); X* = [[1,sqrt(2)],[sqrt(2),2]] is a rank-1 boundary optimum with a rank-1 dual slack S* (strict complementarity). Run at target_digits=50 (bead arb-prec-IPM-h62): the regime where lambda_min(S) ~ mu falls far below any absolute float64 constant in Layer 0.",
   "m": 2,
   "nblocks": 1,
-  "block_sizes": [2],
+  "block_sizes": [
+    2
+  ],
   "maximize": true,
   "optimal_value": "1.4142135623730950488016887242096980785696718753769480731766797379",
   "optimal_value_digits": 65,
@@ -20,12 +22,12 @@
     {
       "kind": "correctness",
       "bead": "arb-prec-IPM-h62",
-      "reason": "Measured 2026-11-10 before the fix: the first OPTIMAL candidate appears at prec 2048 (260 iterations; after mu < 1e-14 the step length collapses and rho_p stalls near 1e23 for ~240 iterations) and its confirming solve needs prec 4096 > prec_cap 1024, so the adaptive solve returns LIMIT."
+      "reason": "Measured 2026-11-10 after h62 (point-mode midpoints) and pw1 (no S jitter): the first OPTIMAL candidate appears at prec 1024 (22 iterations, 64.2 matched digits); its confirming solve needs 2048 > prec_cap 1024, so the adaptive status is LIMIT. The 512-bit solve reaches mu = 5e-48 in 17 iterations, then the residual of the primal Newton equation jumps from ~1e-37 to 1e-11 within two iterations (error growth ~mu^-3 against unit roundoff 1e-154) and it STALLs: an open direction-numerics defect. Before the fixes: candidate at 2048 after 260 iterations."
     },
     {
       "kind": "efficiency",
       "bead": "arb-prec-IPM-h62",
-      "reason": "Measured 2026-11-10 before the fix: 260 iterations at final_prec 2048 (34 bits/digit) against the 22-iteration, 11 bits/digit budget."
+      "reason": "Measured 2026-11-10 after h62 and pw1: 22 iterations (meets the 22 budget) at final_prec 1024 = 16 bits per matched digit against the 11 budget, which a 512-bit solve would meet; same open direction-numerics defect as the correctness gap. Before the fixes: 260 iterations at 2048 (34 bits per digit)."
     }
   ]
 }

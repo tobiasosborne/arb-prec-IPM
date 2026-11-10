@@ -587,9 +587,51 @@ test_minimize_sign(void)
     remove(path);
 }
 
+/* ------------------------------------------------------------------------- *
+ * Test (bead arb-prec-IPM-pw1): ENDGAME iteration count when lambda_min(S)  *
+ * falls far below any float64 constant.  sdp_sqrt2 at prec=1024 with        *
+ * tol_digits=50 drives mu (hence lambda_min(S) on the rank-1 dual slack) to  *
+ * ~1e-52.  An ABSOLUTE jitter on S in the corrector's G-factor (the TS       *
+ * float64 lifeboat 1e-14) dominates lambda_min(S) once mu < 1e-14: S^{-1} in *
+ * the centering term and the Rq scaling are built from S + 1e-14 I, the step *
+ * length collapses (alpha 0.06-0.4) and the solve crawls -- measured 260     *
+ * iterations before the fix.  The NT path converges in 22 (mu falls 1e-4    *
+ * per iteration at alpha = 0.9999).  Budget: OPTIMAL in <= 25 iterations and *
+ * the value within 1e-50 of sqrt(2).                                         *
+ * ------------------------------------------------------------------------- */
+static void
+test_pw1_endgame_iterations(void)
+{
+    arbsdp_problem p;
+    arbsdp_result res;
+    arbsdp_solve_params params;
+    char path[1024];
+    int rc;
+
+    arbsdp_problem_init(&p);
+    snprintf(path, sizeof path, "%s/sdp_sqrt2/sdp_sqrt2.dat-s", GOLDEN_DIR);
+    rc = arbsdp_read_sdpa(&p, path);
+    CHECK(rc == 0, "pw1_endgame: cannot read sdp_sqrt2.dat-s");
+    if (rc != 0) { arbsdp_problem_clear(&p); return; }
+
+    arbsdp_solve_default_params(&params);
+    params.tol_digits = 50;
+    arbsdp_solve(&res, &p, 1024, &params);
+    printf("\n  pw1 endgame: sdp_sqrt2 prec=1024 tol_digits=50 -> status=%d, %d iters.\n",
+           (int) res.status, res.iters);
+    CHECK(res.status == ARBSDP_SOLVE_OPTIMAL, "pw1_endgame: must reach OPTIMAL");
+    CHECK(res.iters <= 25, "pw1_endgame: must converge in <= 25 iterations");
+    CHECK(close_str(res.value, GOLD_SQRT2, 1e-50),
+          "pw1_endgame: value must match sqrt(2) to 1e-50");
+
+    arbsdp_result_clear(&res);
+    arbsdp_problem_clear(&p);
+}
+
 int
 main(void)
 {
+    test_pw1_endgame_iterations();
     test_solve_golden();
     test_beat_or_bracket();
     test_mutation_sign();

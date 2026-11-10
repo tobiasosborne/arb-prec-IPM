@@ -272,7 +272,7 @@ typedef struct {
  * G = diag(sqrt(sv)) * V^T * L^{-1}      (:140-156).
  * L^{-1} is obtained by solving L * invL = I (triangular).
  *
- * Returns 1 on success; 0 if arb_mat_cho fails to prove S + jitter*I PD at
+ * Returns 1 on success; 0 if arb_mat_cho fails to prove S PD at
  * `prec` (bead arb-prec-IPM-0v1).  L is then undefined, so G/sv would be
  * silent garbage poisoning S^{-1}, Rq and the corrector (CLAUDE.md rule 5):
  * the caller must treat 0 as the honest cone-exit (bead b30 mechanism).  On a
@@ -306,15 +306,18 @@ nt_gfactor_build(nt_gfactor *f, const arb_mat_t X, const arb_mat_t S, slong prec
     /* L = chol(S) (lower); arb_mat_cho returns L with L L^T = S. */
     arb_mat_set(Ssym, S);
     arbsdp_symmetrize(Ssym, prec);
-    /* small jitter (1e-14) to keep cho robust on near-singular S (:129). */
-    {
-        arb_t jit;
-        arb_init(jit);
-        arb_set_d(jit, 1e-14);
-        for (slong i = 0; i < n; i++)
-            arb_add(arb_mat_entry(Ssym, i, i), arb_mat_entry(Ssym, i, i), jit, prec);
-        arb_clear(jit);
-    }
+    /* NO jitter (bead arb-prec-IPM-pw1; audition in MATH_SPEC §3.3.1).  The TS
+     * buildNtFactor (:129) adds an ABSOLUTE 1e-14 to S's diagonal, a float64
+     * lifeboat.  In the endgame lambda_min(S) ~ mu << 1e-14, so the jitter
+     * dominates the small eigenvalue: S^{-1} (centering) and G (Rq) are built
+     * for S + 1e-14 I, the step collapses and sdp_sqrt2 at td=50 crawled 260
+     * iterations (22 without).  Precision-relative ||S||_F 2^(-prec/2): same
+     * iterations, but flipped max_eig_path_4_td50 from 512 to 1024 bits (that
+     * golden sits on a knife edge, see MATH_SPEC §3.3.1); 2^(-prec/4): +31
+     * corpus iterations.  S is strictly PD at every interior iterate, so cho of
+     * the exact S succeeds; if it cannot be proven PD at this precision the
+     * failure is the honest cone-exit below (bead 0v1) and the controller
+     * escalates -- no jitter masks it. */
     /* L lower-triangular, L L^T = Ssym.  A failed factor -> honest cone-exit. */
     if (!arb_mat_cho(L, Ssym, prec)) {
         ok = 0;
