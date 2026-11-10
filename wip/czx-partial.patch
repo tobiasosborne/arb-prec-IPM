@@ -1,0 +1,611 @@
+diff --git a/c/include/arbsdp/linalg.h b/c/include/arbsdp/linalg.h
+index 769d466..777155b 100644
+--- a/c/include/arbsdp/linalg.h
++++ b/c/include/arbsdp/linalg.h
+@@ -65,6 +65,10 @@
+ extern "C" {
+ #endif
+ 
++/* Status returned by arbsdp_eigh / arbsdp_eigvalsh when the iteration cap is
++ * exhausted or the input/result is not finite (bead arb-prec-IPM-czx). */
++#define ARBSDP_EIGH_NOT_CONVERGED 1
++
+ /*
+  * arbsdp_eigh -- real-symmetric eigendecomposition (POINT MODE, cyclic Jacobi).
+  *
+@@ -76,9 +80,50 @@ extern "C" {
+  * `eigvals` must point to at least n initialized arb elements (n = side of A).
+  * `Q` must be an initialized n x n arb_mat.  A must be square (asserted).
+  *
++ * Returns 0 on convergence; ARBSDP_EIGH_NOT_CONVERGED if the 100-sweep cap was
++ * exhausted (formerly a SILENT unconverged return -- bead czx) or the input or
++ * an eigenvalue is not finite.  Outputs are then a best effort, NOT to be
++ * trusted; callers propagate the status (CLAUDE.md rule 5).
++ *
+  * POINT MODE: results are midpoints; radii are not trusted (see header banner).
+  */
+-void arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec);
++int arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec);
++
++/*
++ * arbsdp_eigvalsh -- real-symmetric EIGENVALUES ONLY (POINT MODE), ascending.
++ *
++ * Householder tridiagonalization + implicit QL in arf arithmetic on the
++ * midpoints of (A + A^T)/2 (Golub-Van Loan Alg. 8.3.1; EISPACK tql1).  Used
++ * where only extreme eigenvalues are needed (the step-to-boundary and the
++ * strict-PD gate in direction.c): no eigenvectors are formed.  AUDITION
++ * (MATH_SPEC sec. 3.7.1): 2.2-33x faster than arbsdp_eigh at n <= 32,
++ * prec 128..2048, at equal or better accuracy.  Outputs are exact points
++ * (radius 0).  `eigvals` must hold n initialized arb elements.
++ *
++ * Returns 0 on success; ARBSDP_EIGH_NOT_CONVERGED on a non-finite input or
++ * result, or if the QL iteration cap is exhausted (rule 5).
++ */
++int arbsdp_eigvalsh(arb_ptr eigvals, const arb_mat_t A, slong prec);
++
++/*
++ * arbsdp_psd_strict_pd -- the b30 strict-PD gate on eigenvalues only: returns
++ * 1 iff arbsdp_eigvalsh(A) succeeded and
++ *     lambda_min(A) > max(0, lambda_max(A)) * 2^(-prec/2),
++ * i.e. the same rule and threshold as the psd_sqrt / psd_invsqrt gate below.
++ * Returns 0 otherwise (not PD, or not PD to working accuracy).  POINT MODE.
++ */
++int arbsdp_psd_strict_pd(const arb_mat_t A, slong prec);
++
++/*
++ * arbsdp_eigh_count / arbsdp_eigvalsh_count -- number of arbsdp_eigh resp.
++ * arbsdp_eigvalsh calls on the CALLING THREAD since the last
++ * arbsdp_spectral_count_reset (_Thread_local; same convention as the
++ * parse counters in problem.h).  Diagnostics only -- they pin the czx
++ * "eigendecompositions per block per iteration" contract in the tests.
++ */
++ulong arbsdp_eigh_count(void);
++ulong arbsdp_eigvalsh_count(void);
++void  arbsdp_spectral_count_reset(void);
+ 
+ /*
+  * STRICT-PD GATE (CLAUDE.md rule 5; bead arb-prec-IPM-b30) -- both routines
+diff --git a/c/src/linalg.c b/c/src/linalg.c
+index 5969a1b..fb23d26 100644
+--- a/c/src/linalg.c
++++ b/c/src/linalg.c
+@@ -24,20 +24,50 @@
+ #include "arbsdp/linalg.h"
+ #include "arbsdp/svec.h"
+ 
++/*
++ * Spectral-kernel call counters (bead arb-prec-IPM-czx).  Diagnostics only:
++ * they let the test suite pin the number of eigendecompositions per block per
++ * IPM iteration (the czx consolidation contract) and steer nothing.
++ * _Thread_local, same convention as the parse counters in io.c, so a
++ * multi-threaded host cannot race on them.
++ */
++static _Thread_local ulong eigh_count = 0;
++static _Thread_local ulong eigvalsh_count = 0;
++
++ulong arbsdp_eigh_count(void) { return eigh_count; }
++ulong arbsdp_eigvalsh_count(void) { return eigvalsh_count; }
++
++void
++arbsdp_spectral_count_reset(void)
++{
++    eigh_count = 0;
++    eigvalsh_count = 0;
++}
++
++/* Cyclic-Jacobi sweep cap (hard backstop; convergence takes ~10 sweeps,
++ * scale-invariantly -- HANDOFF.md czx probe). */
++#define EIGH_MAX_SWEEPS 100
++
+ /*
+  * arbsdp_eigh -- cyclic-Jacobi symmetric eigendecomposition (POINT MODE).
+  * Port of PsdCone.ts eighJacobi.  eigenvalues ascending; A = Q diag(lambda) Q^T.
++ * Returns 0 on convergence; ARBSDP_EIGH_NOT_CONVERGED if the sweep cap was
++ * exhausted or the input / result is not finite (bead czx: this used to be a
++ * silent unconverged return -- CLAUDE.md rule 5).
+  */
+-void
++int
+ arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec)
+ {
+     slong n = arb_mat_nrows(A);
+     arb_mat_t M;
+     arb_t apq, app, aqq, theta, t, c, s, x, y, nrp, nrq, off, tol2;
++    int converged = 0;
+ 
+     assert(arb_mat_nrows(A) == arb_mat_ncols(A));     /* square */
+     assert(arb_mat_nrows(Q) == n && arb_mat_ncols(Q) == n);
+ 
++    eigh_count++;
++
+     arb_mat_init(M, n, n);
+     arb_mat_set(M, A);
+     arbsdp_symmetrize(M, prec); /* REUSE svec.h; M <- (M + M^T)/2 */
+@@ -59,7 +89,8 @@ arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec)
+         arb_mul_2exp_si(tol2, tol2, e);
+     }
+ 
+-    for (slong sweep = 0; sweep < 100; sweep++) {
++    /* sweep <= EIGH_MAX_SWEEPS: the final pass only re-tests convergence. */
++    for (slong sweep = 0; sweep <= EIGH_MAX_SWEEPS; sweep++) {
+         /* off = sum_{i<j} M_{ij}^2 */
+         arb_zero(off);
+         for (slong i = 0; i < n; i++)
+@@ -67,8 +98,14 @@ arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec)
+                 arb_mul(x, arb_mat_entry(M, i, j), arb_mat_entry(M, i, j), prec);
+                 arb_add(off, off, x, prec);
+             }
+-        if (arf_cmp(arb_midref(off), arb_midref(tol2)) < 0)
++        /* A NaN `off` compares unordered (arf_cmp != -1), so a non-finite
++         * input never "converges" and exhausts the cap -> status below. */
++        if (arf_cmp(arb_midref(off), arb_midref(tol2)) < 0) {
++            converged = 1;
+             break;
++        }
++        if (sweep == EIGH_MAX_SWEEPS)
++            break;                       /* cap exhausted: report, do not loop */
+ 
+         for (slong p = 0; p < n - 1; p++) {
+             for (slong q = p + 1; q < n; q++) {
+@@ -149,9 +186,12 @@ arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec)
+         }
+     }
+ 
+-    /* eigenvalues = diag(M) */
+-    for (slong i = 0; i < n; i++)
++    /* eigenvalues = diag(M); a non-finite eigenvalue is a failure too. */
++    for (slong i = 0; i < n; i++) {
+         arb_set(eigvals + i, arb_mat_entry(M, i, i));
++        if (!arf_is_finite(arb_midref(eigvals + i)))
++            converged = 0;
++    }
+ 
+     /* Selection sort ascending; swap matching Q columns.  Compare midpoints
+      * (POINT MODE -- the ordering is on the point estimates). */
+@@ -172,6 +212,7 @@ arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec)
+     arb_clear(y);   arb_clear(nrp); arb_clear(nrq); arb_clear(off);
+     arb_clear(tol2);
+     arb_mat_clear(M);
++    return converged ? 0 : ARBSDP_EIGH_NOT_CONVERGED;
+ }
+ 
+ /*
+@@ -231,7 +272,11 @@ psd_pow_half(arb_mat_t out, const arb_mat_t A, int invert, slong prec)
+     arb_init(floor_lam);
+     arb_init(lam_max);
+ 
+-    arbsdp_eigh(lam, Q, A, prec);   /* eigenvalues ASCENDING: lam[0]=min, lam[n-1]=max */
++    /* eigenvalues ASCENDING: lam[0]=min, lam[n-1]=max.  An unconverged / non-
++     * finite decomposition cannot certify (point-mode) strict PD: fail loud
++     * through the same status (bead czx). */
++    if (arbsdp_eigh(lam, Q, A, prec) != 0)
++        not_pd = 1;
+ 
+     /* Precision-relative strict-PD floor = max(0, lam_max) * 2^(-prec/2).
+      * lam_max is the largest eigenvalue midpoint (lam[n-1]); if it is itself
+@@ -305,3 +350,251 @@ arbsdp_psd_invsqrt(arb_mat_t out, const arb_mat_t A, slong prec)
+ {
+     return psd_pow_half(out, A, 1, prec);
+ }
++
++/* ========================================================================= *
++ * Eigenvalues only (bead arb-prec-IPM-czx): Householder tridiagonalization  *
++ * + implicit QL, in arf point arithmetic.                                    *
++ * ========================================================================= */
++
++/*
++ * GROUND TRUTH (CLAUDE.md rule 3):
++ *   - Householder reduction to tridiagonal form: Golub & Van Loan, Matrix
++ *     Computations (4th ed.), Alg. 8.3.1 (symmetric Householder tridiagonal-
++ *     ization; the rank-2 update A22 -= v w^T + w v^T with p = beta A22 v,
++ *     w = p - (beta v^T p / 2) v, beta = 2 / v^T v).
++ *   - Implicit QL with a Wilkinson-type shift, eigenvalues only: EISPACK tql1
++ *     (Bowdler, Martin, Reinsch, Wilkinson, Numer. Math. 11 (1968) 293-306);
++ *     loop structure as Numerical Recipes 2nd ed. sec. 11.3 tqli, with the
++ *     deflation test |e_m| <= 2^-prec (|d_m| + |d_{m+1}|).
++ *   - Both are backward stable: computed eigenvalues are exact for A + E,
++ *     ||E|| = O(n ||A|| 2^-prec)  (Golub-Van Loan sec. 8.3.6), the same
++ *     absolute accuracy class as cyclic Jacobi on an indefinite input.
++ * AUDITION (docs/MATH_SPEC.md sec. 3.7.1): 2.2-33x faster than arbsdp_eigh
++ * at n in {4..32}, prec in {128..2048}, 3-6 bits better absolute accuracy.
++ *
++ * POINT MODE (CLAUDE.md rule 1; bead h62): the input is read as MIDPOINTS
++ * and all arithmetic is arf with round-to-nearest at `prec` -- no radii are
++ * ever formed, so none can truncate sqrt/div results.
++ */
++#define EIGVALSH_MAX_QL_ITERS 200   /* per eigenvalue; typical is 2-6 (cubic) */
++
++int
++arbsdp_eigvalsh(arb_ptr eigvals, const arb_mat_t A, slong prec)
++{
++    const arf_rnd_t rnd = ARF_RND_NEAR;
++    slong n = arb_mat_nrows(A);
++    arf_ptr a, d, e, v, w;
++    arf_t t, u, alpha, beta, K, g, r, s, c, p, f, b, dd, eps;
++    int status = 0;
++
++    assert(arb_mat_nrows(A) == arb_mat_ncols(A));     /* square */
++    eigvalsh_count++;
++    if (n == 0)
++        return 0;
++
++    a = _arf_vec_init(n * n);
++    d = _arf_vec_init(n);
++    e = _arf_vec_init(n);
++    v = _arf_vec_init(n);
++    w = _arf_vec_init(n);
++    arf_init(t); arf_init(u); arf_init(alpha); arf_init(beta); arf_init(K);
++    arf_init(g); arf_init(r); arf_init(s); arf_init(c); arf_init(p);
++    arf_init(f); arf_init(b); arf_init(dd); arf_init(eps);
++
++#define A_(i, j) (a + (i) * n + (j))
++    /* a = mid((A + A^T)/2): the symmetric part, as for arbsdp_eigh. */
++    for (slong i = 0; i < n; i++)
++        for (slong j = 0; j < n; j++) {
++            arf_add(A_(i, j), arb_midref(arb_mat_entry(A, i, j)),
++                    arb_midref(arb_mat_entry(A, j, i)), prec, rnd);
++            arf_mul_2exp_si(A_(i, j), A_(i, j), -1);
++            if (!arf_is_finite(A_(i, j)))
++                status = ARBSDP_EIGH_NOT_CONVERGED;   /* fail loud on NaN/Inf */
++        }
++    if (status != 0)
++        goto cleanup;
++
++    /* --- Householder tridiagonalization (GVL Alg. 8.3.1) ----------------- */
++    for (slong k = 0; k + 2 < n; k++) {
++        slong m = n - k - 1;                 /* x = A[k+1 .. n-1, k] */
++        arf_zero(u);
++        for (slong i = 0; i < m; i++)
++            arf_addmul(u, A_(k + 1 + i, k), A_(k + 1 + i, k), prec, rnd);
++        if (arf_is_zero(u))
++            continue;                        /* column already reduced */
++        arf_sqrt(alpha, u, prec, rnd);       /* ||x|| */
++        if (arf_sgn(A_(k + 1, k)) > 0)
++            arf_neg(alpha, alpha);           /* alpha = -sign(x_0) ||x|| */
++        for (slong i = 0; i < m; i++)
++            arf_set(v + i, A_(k + 1 + i, k));
++        arf_sub(v + 0, v + 0, alpha, prec, rnd);   /* v = x - alpha e_1 */
++        arf_zero(t);
++        for (slong i = 0; i < m; i++)
++            arf_addmul(t, v + i, v + i, prec, rnd);
++        if (arf_is_zero(t))
++            continue;
++        arf_ui_div(beta, 2, t, prec, rnd);   /* beta = 2 / v^T v */
++        for (slong i = 0; i < m; i++) {      /* w = beta A22 v */
++            arf_zero(u);
++            for (slong j = 0; j < m; j++)
++                arf_addmul(u, A_(k + 1 + i, k + 1 + j), v + j, prec, rnd);
++            arf_mul(w + i, u, beta, prec, rnd);
++        }
++        arf_zero(K);                         /* K = beta v^T w / 2 */
++        for (slong i = 0; i < m; i++)
++            arf_addmul(K, v + i, w + i, prec, rnd);
++        arf_mul(K, K, beta, prec, rnd);
++        arf_mul_2exp_si(K, K, -1);
++        for (slong i = 0; i < m; i++)        /* w -= K v */
++            arf_submul(w + i, K, v + i, prec, rnd);
++        for (slong i = 0; i < m; i++)        /* A22 -= v w^T + w v^T */
++            for (slong j = 0; j <= i; j++) {
++                arf_submul(A_(k + 1 + i, k + 1 + j), v + i, w + j, prec, rnd);
++                arf_submul(A_(k + 1 + i, k + 1 + j), w + i, v + j, prec, rnd);
++                arf_set(A_(k + 1 + j, k + 1 + i), A_(k + 1 + i, k + 1 + j));
++            }
++        arf_set(A_(k + 1, k), alpha);        /* the new subdiagonal entry */
++    }
++    for (slong i = 0; i < n; i++)
++        arf_set(d + i, A_(i, i));
++    for (slong i = 0; i + 1 < n; i++)
++        arf_set(e + i, A_(i + 1, i));
++    arf_zero(e + n - 1);
++#undef A_
++
++    /* --- implicit QL, eigenvalues only (tql1 / NR tqli) ------------------ */
++    arf_one(eps);
++    arf_mul_2exp_si(eps, eps, -prec);
++    for (slong l = 0; l < n; l++) {
++        int iter = 0;
++        slong mm;
++        do {
++            for (mm = l; mm < n - 1; mm++) { /* deflation: small e_mm */
++                arf_abs(dd, d + mm);
++                arf_abs(t, d + mm + 1);
++                arf_add(dd, dd, t, prec, rnd);
++                arf_mul(dd, dd, eps, prec, rnd);
++                if (arf_cmpabs(e + mm, dd) <= 0)
++                    break;
++            }
++            if (mm != l) {
++                int zr = 0;
++                if (iter++ == EIGVALSH_MAX_QL_ITERS) {
++                    status = ARBSDP_EIGH_NOT_CONVERGED;
++                    goto cleanup;
++                }
++                /* shift: g = d_mm - d_l + e_l / (g + sign(g) sqrt(g^2+1)),
++                 * g = (d_{l+1} - d_l) / (2 e_l) */
++                arf_sub(g, d + l + 1, d + l, prec, rnd);
++                arf_mul_2exp_si(t, e + l, 1);
++                arf_div(g, g, t, prec, rnd);
++                arf_mul(r, g, g, prec, rnd);
++                arf_add_ui(r, r, 1, prec, rnd);
++                arf_sqrt(r, r, prec, rnd);
++                if (arf_sgn(g) < 0)
++                    arf_sub(t, g, r, prec, rnd);
++                else
++                    arf_add(t, g, r, prec, rnd);
++                arf_div(t, e + l, t, prec, rnd);
++                arf_sub(g, d + mm, d + l, prec, rnd);
++                arf_add(g, g, t, prec, rnd);
++                arf_one(s);
++                arf_one(c);
++                arf_zero(p);
++                for (slong i = mm - 1; i >= l; i--) {   /* plane rotations */
++                    arf_mul(f, s, e + i, prec, rnd);
++                    arf_mul(b, c, e + i, prec, rnd);
++                    arf_mul(r, f, f, prec, rnd);
++                    arf_addmul(r, g, g, prec, rnd);
++                    arf_sqrt(r, r, prec, rnd);          /* r = hypot(f, g) */
++                    arf_set(e + i + 1, r);
++                    if (arf_is_zero(r)) {               /* underflow recovery */
++                        arf_sub(d + i + 1, d + i + 1, p, prec, rnd);
++                        arf_zero(e + mm);
++                        zr = 1;
++                        break;
++                    }
++                    arf_div(s, f, r, prec, rnd);
++                    arf_div(c, g, r, prec, rnd);
++                    arf_sub(g, d + i + 1, p, prec, rnd);
++                    arf_sub(r, d + i, g, prec, rnd);
++                    arf_mul(r, r, s, prec, rnd);
++                    arf_mul(t, c, b, prec, rnd);
++                    arf_mul_2exp_si(t, t, 1);
++                    arf_add(r, r, t, prec, rnd);        /* r = (d_i - g)s + 2cb */
++                    arf_mul(p, s, r, prec, rnd);
++                    arf_add(d + i + 1, g, p, prec, rnd);
++                    arf_mul(g, c, r, prec, rnd);
++                    arf_sub(g, g, b, prec, rnd);
++                }
++                if (zr)
++                    continue;
++                arf_sub(d + l, d + l, p, prec, rnd);
++                arf_set(e + l, g);
++                arf_zero(e + mm);
++            }
++        } while (mm != l);
++    }
++
++    /* insertion sort ascending; exact (radius-0) arb outputs */
++    for (slong i = 1; i < n; i++)
++        for (slong j = i; j > 0 && arf_cmp(d + j - 1, d + j) > 0; j--)
++            arf_swap(d + j - 1, d + j);
++    for (slong i = 0; i < n; i++) {
++        if (!arf_is_finite(d + i))
++            status = ARBSDP_EIGH_NOT_CONVERGED;
++        arb_set_arf(eigvals + i, d + i);
++    }
++
++cleanup:
++    _arf_vec_clear(a, n * n);
++    _arf_vec_clear(d, n);
++    _arf_vec_clear(e, n);
++    _arf_vec_clear(v, n);
++    _arf_vec_clear(w, n);
++    arf_clear(t); arf_clear(u); arf_clear(alpha); arf_clear(beta); arf_clear(K);
++    arf_clear(g); arf_clear(r); arf_clear(s); arf_clear(c); arf_clear(p);
++    arf_clear(f); arf_clear(b); arf_clear(dd); arf_clear(eps);
++    return status;
++}
++
++/*
++ * arbsdp_psd_strict_pd -- the b30 strict-PD gate (see psd_pow_half) evaluated
++ * on eigenvalues only: 1 iff the kernel converged and
++ *     lambda_min > max(0, lambda_max) * 2^(-prec/2);
++ * 0 otherwise.  Same rule and threshold as the psd_sqrt / psd_invsqrt gate.
++ * The eigenvalues come from arbsdp_eigvalsh (absolute accuracy
++ * O(n ||A|| 2^-prec)), so the decision can differ from the Jacobi-based gate
++ * only for lambda_min inside a relative ~2^-(prec/2) band around the
++ * threshold.  (The gate's arb_contains_zero clause is subsumed: eigvalsh
++ * returns exact points, so a zero-straddling ball cannot occur.)
++ */
++int
++arbsdp_psd_strict_pd(const arb_mat_t A, slong prec)
++{
++    slong n = arb_mat_nrows(A);
++    arb_ptr lam;
++    arf_t floor_lam;
++    int pd = 1;
++
++    assert(arb_mat_nrows(A) == arb_mat_ncols(A));     /* square */
++    if (n == 0)
++        return 1;
++    lam = _arb_vec_init(n);
++    arf_init(floor_lam);
++
++    if (arbsdp_eigvalsh(lam, A, prec) != 0) {
++        pd = 0;
++    } else {
++        if (arf_sgn(arb_midref(lam + n - 1)) <= 0)
++            arf_zero(floor_lam);
++        else
++            arf_mul_2exp_si(floor_lam, arb_midref(lam + n - 1), -(prec / 2));
++        if (arf_cmp(arb_midref(lam + 0), floor_lam) <= 0)
++            pd = 0;
++    }
++
++    arf_clear(floor_lam);
++    _arb_vec_clear(lam, n);
++    return pd;
++}
+diff --git a/c/test/test_linalg.c b/c/test/test_linalg.c
+index 7fab074..c426120 100644
+--- a/c/test/test_linalg.c
++++ b/c/test/test_linalg.c
+@@ -576,6 +576,159 @@ test_point_mode_radius_independent(void)
+     arb_mat_clear(Rb);
+ }
+ 
++
++/* ------------------------------------------------------------------------- *
++ * bead arb-prec-IPM-czx: eigh status (fail loud), eigvalsh, strict-PD gate.  *
++ * ------------------------------------------------------------------------- */
++
++/* Fill a symmetric n x n matrix with exact dyadic pseudo-random entries. */
++static void
++fill_sym_random(arb_mat_t A, flint_rand_t st)
++{
++    slong n = arb_mat_nrows(A);
++    for (slong i = 0; i < n; i++)
++        for (slong j = 0; j <= i; j++) {
++            arb_set_si(arb_mat_entry(A, i, j), (slong) n_randint(st, 2001) - 1000);
++            arb_mul_2exp_si(arb_mat_entry(A, i, j), arb_mat_entry(A, i, j), -10);
++            arb_set(arb_mat_entry(A, j, i), arb_mat_entry(A, i, j));
++        }
++}
++
++/*
++ * (c) SWEEP-CAP / NON-FINITE STATUS.  Before czx arbsdp_eigh was void: a NaN
++ * entry makes the off-diagonal sum NaN, which never compares below the
++ * tolerance, so all 100 sweeps ran and the unconverged (NaN) decomposition was
++ * returned silently.  The status must now be ARBSDP_EIGH_NOT_CONVERGED, and it
++ * must propagate through psd_sqrt / psd_invsqrt (their gate status).
++ * MUTATION: `return 0` unconditionally in arbsdp_eigh turns this red.
++ */
++static void
++test_eigh_status(void)
++{
++    const slong n = 4;
++    arb_mat_t A, Q, R;
++    arb_ptr lam;
++    flint_rand_t st;
++
++    flint_randinit(st);
++    arb_mat_init(A, n, n);
++    arb_mat_init(Q, n, n);
++    arb_mat_init(R, n, n);
++    lam = _arb_vec_init(n);
++
++    fill_sym_random(A, st);
++    CHECK(arbsdp_eigh(lam, Q, A, PREC) == 0,
++          "eigh status: a finite symmetric matrix must converge (status 0)");
++    CHECK(arbsdp_eigvalsh(lam, A, PREC) == 0,
++          "eigvalsh status: a finite symmetric matrix must converge (status 0)");
++
++    arb_indeterminate(arb_mat_entry(A, 1, 2));          /* NaN midpoint */
++    arb_indeterminate(arb_mat_entry(A, 2, 1));
++    CHECK(arbsdp_eigh(lam, Q, A, PREC) == ARBSDP_EIGH_NOT_CONVERGED,
++          "eigh status: a NaN entry must exhaust the sweep cap and REPORT it");
++    CHECK(arbsdp_eigvalsh(lam, A, PREC) == ARBSDP_EIGH_NOT_CONVERGED,
++          "eigvalsh status: a NaN entry must be reported");
++    CHECK(arbsdp_psd_sqrt(R, A, PREC) != 0,
++          "eigh status must propagate: psd_sqrt of a NaN matrix must signal");
++    CHECK(arbsdp_psd_invsqrt(R, A, PREC) != 0,
++          "eigh status must propagate: psd_invsqrt of a NaN matrix must signal");
++    CHECK(arbsdp_psd_strict_pd(A, PREC) == 0,
++          "eigh status must propagate: strict_pd of a NaN matrix must be 0");
++
++    _arb_vec_clear(lam, n);
++    arb_mat_clear(A);
++    arb_mat_clear(Q);
++    arb_mat_clear(R);
++    flint_randclear(st);
++}
++
++/*
++ * eigvalsh agrees with eigh (both ascending) to ~prec bits on random symmetric
++ * matrices, n in {1,2,5,12,24}, prec in {128, 512, 2048}.  Reference: eigh at
++ * 4*prec on the same exact input.  Tolerance n * 2^-(prec-16) (absolute,
++ * backward-stable class; entries are <= 1 so ||A|| <= n).  MUTATION: dropping
++ * the 2cb term of the QL rotation (r = (d_i - g)s) turns this red.
++ */
++static void
++test_eigvalsh_matches_eigh(void)
++{
++    const slong ns[] = {1, 2, 5, 12, 24};
++    const slong ps[] = {128, 512, 2048};
++    flint_rand_t st;
++    flint_randinit(st);
++    for (int a = 0; a < 5; a++)
++        for (int b = 0; b < 3; b++) {
++            slong n = ns[a], pr = ps[b];
++            arb_mat_t A, Q;
++            arb_ptr ref, lam;
++            arf_t dif, tol;
++            int ok = 1;
++            arb_mat_init(A, n, n);
++            arb_mat_init(Q, n, n);
++            ref = _arb_vec_init(n);
++            lam = _arb_vec_init(n);
++            arf_init(dif);
++            arf_init(tol);
++            fill_sym_random(A, st);
++            ok &= (arbsdp_eigh(ref, Q, A, 4 * pr) == 0);
++            ok &= (arbsdp_eigvalsh(lam, A, pr) == 0);
++            arf_one(tol);
++            arf_mul_2exp_si(tol, tol, -(pr - 16));
++            arf_mul_si(tol, tol, n, 64, ARF_RND_UP);
++            for (slong i = 0; i < n; i++) {
++                arf_sub(dif, arb_midref(lam + i), arb_midref(ref + i),
++                        4 * pr, ARF_RND_NEAR);
++                if (arf_cmpabs(dif, tol) > 0)
++                    ok = 0;
++                if (!mag_is_zero(arb_radref(lam + i)))
++                    ok = 0;                            /* exact point outputs */
++            }
++            CHECK(ok, "eigvalsh: eigenvalues must match eigh to ~prec bits");
++            arf_clear(dif);
++            arf_clear(tol);
++            _arb_vec_clear(ref, n);
++            _arb_vec_clear(lam, n);
++            arb_mat_clear(A);
++            arb_mat_clear(Q);
++        }
++    flint_randclear(st);
++}
++
++/*
++ * arbsdp_psd_strict_pd uses the SAME b30 threshold as psd_invsqrt:
++ * lambda_min > lambda_max * 2^(-prec/2).  diag(1, 2^-(prec/2 - 8)) passes,
++ * diag(1, 2^-(prec/2 + 8)), diag(1, 0) and diag(1, -1) fail, and the decisions
++ * agree with psd_invsqrt's gate on the same inputs.  MUTATION: comparing
++ * against 2^(-prec) instead of 2^(-prec/2) turns the 2^-(prec/2+8) case red.
++ */
++static void
++test_strict_pd_threshold(void)
++{
++    const slong n = 2;
++    const slong exps[] = {PREC / 2 - 8, PREC / 2 + 8};
++    arb_mat_t A, R;
++    arb_mat_init(A, n, n);
++    arb_mat_init(R, n, n);
++    for (int k = 0; k < 2; k++) {
++        int want = (k == 0);
++        arb_mat_zero(A);
++        arb_one(arb_mat_entry(A, 0, 0));
++        arb_one(arb_mat_entry(A, 1, 1));
++        arb_mul_2exp_si(arb_mat_entry(A, 1, 1), arb_mat_entry(A, 1, 1), -exps[k]);
++        CHECK(arbsdp_psd_strict_pd(A, PREC) == want,
++              "strict_pd: b30 threshold lambda_min > lambda_max 2^(-prec/2)");
++        CHECK((arbsdp_psd_invsqrt(R, A, PREC) == 0) == want,
++              "strict_pd must agree with the psd_invsqrt gate");
++    }
++    arb_mat_zero(A);
++    arb_one(arb_mat_entry(A, 0, 0));
++    CHECK(arbsdp_psd_strict_pd(A, PREC) == 0, "strict_pd: diag(1,0) is not PD");
++    arb_set_si(arb_mat_entry(A, 1, 1), -1);
++    CHECK(arbsdp_psd_strict_pd(A, PREC) == 0, "strict_pd: diag(1,-1) is not PD");
++    arb_mat_clear(A);
++    arb_mat_clear(R);
++}
++
+ int
+ main(void)
+ {
+@@ -587,6 +740,9 @@ main(void)
+     test_strict_pd_gate();
+     test_orthogonality();
+     test_mutation_sanity();
++    test_eigh_status();
++    test_eigvalsh_matches_eigh();
++    test_strict_pd_threshold();
+ 
+     /* Free FLINT's thread-local caches (fmpz pool, arf scratch, registered
+      * cleanup hooks) so valgrind reports no possibly-lost / reachable

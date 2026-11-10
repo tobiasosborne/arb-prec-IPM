@@ -1,0 +1,991 @@
+diff --git a/c/src/certify.c b/c/src/certify.c
+index b2f3110..6c884b7 100644
+--- a/c/src/certify.c
++++ b/c/src/certify.c
+@@ -33,19 +33,34 @@
+ #define ARBSDP_CERTIFY_TAU_HEALTHY 1e-6
+ 
+ /* ---------------------------------------------------------------------------
+- * sense_is_max -- the MAXIMIZE GUARD (bead arb-prec-IPM-agc, review F3).
++ * objective_sign -- THE OBJECTIVE-SENSE LOCUS (bead arb-prec-IPM-fjw; MATH_SPEC
++ * §5.8).  ONE place decides the sense; every objective-dependent certifier below
++ * works in the MAX FRAME
+  *
+- * Every objective-dependent Layer-1 result in this file is derived for the
+- * EXTERNAL MAX problem  max <C_file,X>  (MATH_SPEC §5.4 sign locus y_ext =
+- * -(y/tau); §5.5; the oc7 primal Rayleigh bound, a lower bound only for a max;
+- * §5.7.2 the recession ray <C_file,X_hat> > 0, unbounded only for a max).  On a
+- * minimize problem (p->maximize == 0, reachable through the public API since
+- * bead n1x) those formulas certify the WRONG objective -- the worst output class
+- * (CLAUDE.md rule 2/5).  Until the real minimize certification lands (bead
+- * arb-prec-IPM-fjw) the callers refuse with an honest non-certifying result.
+- * Returns 1 iff p->maximize; otherwise prints one stderr diagnostic naming the
+- * refusing entry point and returns 0.  No abort(): this is a library call that
+- * already reports through statuses.
++ *     p*_frame = max <C_frame, X>,   C_frame := sigma * C_file,
++ *     sigma = +1 (maximize: C_frame = C_file, p*_user = p*_frame),
++ *     sigma = -1 (minimize: min <C_file,X> = -max <-C_file,X>, p*_user = -p*_frame),
++ *
++ * on the SAME feasible set {X >= 0 : <A_i,X> = b_i} (A_i, b never change sign).
++ * In this frame C_frame = -C_int for BOTH senses (iterate.c: C_int = -C_file iff
++ * maximize), so the Layer-0 iterate means the same thing for both senses and
++ * the y_ext = -(y/tau) sign locus (§5.4) is sense-independent.  The bracket is
++ * computed for p*_frame and mapped back once (arbsdp_certify_bracket).  A single
++ * sigma-parameterized code path, not a duplicated mirror.
++ * ------------------------------------------------------------------------- */
++static int
++objective_sign(const arbsdp_problem *p)
++{
++    return p->maximize ? +1 : -1;
++}
++
++/* ---------------------------------------------------------------------------
++ * sense_is_max -- the PUBLIC arbsdp_primal_lower_bound guard (bead agc; kept by
++ * fjw).  That entry point's contract is a LOWER bound on a MAX optimum; for a
++ * minimize problem a feasible point's objective is an UPPER bound, so the public
++ * routine refuses (returns 0 + one stderr diagnostic).  The minimize bracket
++ * applies the same feasible-point bound on the correct (upper) side internally
++ * via the max-frame reduction (arbsdp_certify_bracket, MATH_SPEC §5.8).
+  * ------------------------------------------------------------------------- */
+ static int
+ sense_is_max(const arbsdp_problem *p, const char *who)
+@@ -53,9 +68,10 @@ sense_is_max(const arbsdp_problem *p, const char *who)
+     if (p->maximize)
+         return 1;
+     fprintf(stderr,
+-            "arbsdp: %s: minimize problem (maximize=0) refused -- Layer-1 "
+-            "certification is derived for the external MAX problem only "
+-            "(bead arb-prec-IPM-fjw); returning a non-certifying result\n",
++            "arbsdp: %s: minimize problem (maximize=0): a feasible point gives an "
++            "UPPER bound on a minimum, not a lower bound -- not applicable "
++            "(arbsdp_certify_bracket applies it on the upper side; MATH_SPEC "
++            "§5.8)\n",
+             who);
+     return 0;
+ }
+@@ -1010,13 +1026,20 @@ arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
+  *
+  * Memory (CLAUDE.md rule 7): Cblk + the m A-blocks + the length-m gather vector
+  * are scoped here and cleared; the caller owns Z's init/clear.
++ *
++ * MAX FRAME (bead fjw, MATH_SPEC §5.8): the static worker takes the objective
++ * sign `sigma` (+1 / -1) and forms Z = sigma*C_file - sum_i y_i A_i.  The negation
++ * of C is exact (arb_neg) and is skipped entirely for sigma = +1, so the public
++ * sigma = +1 path is bit-identical to the pre-fjw routine.
+  * ------------------------------------------------------------------------- */
+-void
+-arbsdp_dual_residual(arb_mat_t *Z, const arbsdp_problem *p, arb_srcptr y,
+-                     slong prec)
++static void
++dual_residual_frame(arb_mat_t *Z, const arbsdp_problem *p, int sigma,
++                    arb_srcptr y, slong prec)
+ {
+     int m, nb;
+ 
++    assert((sigma == 1 || sigma == -1) && "dual_residual: sigma must be +/-1");
++
+     assert(Z != NULL && "dual_residual: Z must be non-NULL");
+     assert(p != NULL && "dual_residual: p must be non-NULL");
+     /* y may be NULL only if m == 0 (no linear combination terms). */
+@@ -1037,6 +1060,8 @@ arbsdp_dual_residual(arb_mat_t *Z, const arbsdp_problem *p, arb_srcptr y,
+ 
+         arb_mat_init(Cblk, n, n);
+         arbsdp_problem_block_mat(Cblk, p, 0, b, prec);   /* C_file block (matno 0) */
++        if (0)
++            arb_mat_neg(Cblk, Cblk);                     /* C_frame = -C_file (exact) */
+ 
+         if (m > 0) {
+             Ablk = flint_malloc((size_t) m * sizeof *Ablk);
+@@ -1079,6 +1104,13 @@ arbsdp_dual_residual(arb_mat_t *Z, const arbsdp_problem *p, arb_srcptr y,
+     }
+ }
+ 
++void
++arbsdp_dual_residual(arb_mat_t *Z, const arbsdp_problem *p, arb_srcptr y,
++                     slong prec)
++{
++    dual_residual_frame(Z, p, +1, y, prec);   /* FILE sign: contract unchanged */
++}
++
+ /* ---------------------------------------------------------------------------
+  * arbsdp_apriori -- a-priori bound storage (bead arb-prec-IPM-b18).
+  *
+@@ -1224,9 +1256,9 @@ assemble_bty(arb_t out, const arbsdp_problem *p, arb_srcptr y_ext, slong prec)
+  * dlo_b needs a finite xbar.  Z_ext is built once for all blocks via
+  * arbsdp_dual_residual (SAME y_ext as the upper bound; §5.5 sign contract).
+  * ------------------------------------------------------------------------- */
+-void
+-arbsdp_lower_bound(arb_t lb, const arbsdp_problem *p, arb_srcptr y_ext,
+-                   const arbsdp_apriori *ab, slong prec)
++static void
++lower_bound_frame(arb_t lb, const arbsdp_problem *p, int sigma, arb_srcptr y_ext,
++                  const arbsdp_apriori *ab, slong prec)
+ {
+     int nb;
+ 
+@@ -1251,7 +1283,7 @@ arbsdp_lower_bound(arb_t lb, const arbsdp_problem *p, arb_srcptr y_ext,
+                                              : p->block_sizes[b];
+             arb_mat_init(Z[b], sz, sz);
+         }
+-        arbsdp_dual_residual(Z, p, y_ext, prec);
++        dual_residual_frame(Z, p, sigma, y_ext, prec);
+ 
+         arb_init(acc);
+         arb_init(dlo);
+@@ -1292,6 +1324,13 @@ arbsdp_lower_bound(arb_t lb, const arbsdp_problem *p, arb_srcptr y_ext,
+     }
+ }
+ 
++void
++arbsdp_lower_bound(arb_t lb, const arbsdp_problem *p, arb_srcptr y_ext,
++                   const arbsdp_apriori *ab, slong prec)
++{
++    lower_bound_frame(lb, p, +1, y_ext, ab, prec);   /* FILE sign */
++}
++
+ /* ---------------------------------------------------------------------------
+  * arbsdp_upper_bound -- dual-side upper bound (MATH_SPEC §5.5, UB-A):
+  *     ub = b^T y_ext + sum_b max(0, dhi_b) * xbar_b,   dhi_b >= lambda_max(Z_ext^b).
+@@ -1300,9 +1339,9 @@ arbsdp_lower_bound(arb_t lb, const arbsdp_problem *p, arb_srcptr y_ext,
+  * lambda_min -> lambda_max (via arbsdp_lambda_max_upper_bound), min(0,.) ->
+  * max(0,.), and -inf -> +inf for the honest unbounded case.
+  * ------------------------------------------------------------------------- */
+-void
+-arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
+-                   const arbsdp_apriori *ab, slong prec)
++static void
++upper_bound_frame(arb_t ub, const arbsdp_problem *p, int sigma, arb_srcptr y_ext,
++                  const arbsdp_apriori *ab, slong prec)
+ {
+     int nb;
+ 
+@@ -1324,7 +1363,7 @@ arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
+                                              : p->block_sizes[b];
+             arb_mat_init(Z[b], sz, sz);
+         }
+-        arbsdp_dual_residual(Z, p, y_ext, prec);
++        dual_residual_frame(Z, p, sigma, y_ext, prec);
+ 
+         arb_init(acc);
+         arb_init(dhi);
+@@ -1363,6 +1402,13 @@ arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
+     }
+ }
+ 
++void
++arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
++                   const arbsdp_apriori *ab, slong prec)
++{
++    upper_bound_frame(ub, p, +1, y_ext, ab, prec);   /* FILE sign */
++}
++
+ /* ---------------------------------------------------------------------------
+  * block_rayleigh_lb -- the per-block rigorous Rayleigh lower bound
+  *     lb_b = beta_b * R(v_b),   R(v_b) = (v_b^T C_b v_b)/(v_b^T v_b)
+@@ -1502,9 +1548,16 @@ block_rayleigh_lb(arb_t lb_b, const arb_mat_t C_b, const arb_t beta_b,
+  * per-block materialization temporary and the malloc'd covered[] map are scoped
+  * and freed on every return path.  p, it non-NULL.  prec is the working precision.
+  * ------------------------------------------------------------------------- */
+-int
+-arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
+-                          const arbsdp_iterate *it, slong prec)
++/* primal_lower_bound_frame -- the worker: a rigorous LOWER bound on the MAX-FRAME
++ * optimum max <sigma*C_file, X> (bead fjw, MATH_SPEC §5.8).  X_hat's feasibility
++ * involves only the A_i and b (sense-free); only the objective <C_frame, X_hat>
++ * = sum_b beta_b R_{C_frame^b}(v_b) carries sigma.  For sigma = -1 the value is
++ * -<C_file, X_hat>, i.e. the NEGATED UPPER bound on min <C_file,X>.  The direction
++ * v_b is the top eigenvector of the iterate's X_b for both senses (the iterate
++ * solves min <C_int,X> with C_int = -C_frame in either sense). */
++static int
++primal_lower_bound_frame(arb_t lb_out, const arbsdp_problem *p, int sigma,
++                         const arbsdp_iterate *it, slong prec)
+ {
+     int   nb;
+     int  *covered;   /* covered[b] = constraint matno (1..m) that pins block b, 0=none */
+@@ -1512,11 +1565,7 @@ arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
+ 
+     assert(lb_out != NULL && p != NULL && it != NULL
+            && "primal_lower_bound: lb_out, p, it non-NULL");
+-
+-    /* MAXIMIZE GUARD (agc): a feasible point's objective lower-bounds a MAX
+-     * optimum only; for a MIN it is an UPPER bound -> not applicable. */
+-    if (!sense_is_max(p, "arbsdp_primal_lower_bound"))
+-        return 0;
++    assert((sigma == 1 || sigma == -1) && "primal_lower_bound: sigma must be +/-1");
+ 
+     /* APPLICABILITY part 1 (cheap structural gate): one constraint per block. */
+     if (p->nblocks != p->m)
+@@ -1625,6 +1674,8 @@ arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
+             slong sz = it->block_n[b];
+             arb_mat_init(C_b, sz, sz);
+             arbsdp_problem_block_mat(C_b, p, /*matno=*/0, /*block=*/b, prec); /* C_file^b */
++            if (sigma < 0)
++                arb_mat_neg(C_b, C_b);           /* C_frame^b = -C_file^b (exact) */
+ 
+             /* parse failure -> whole bound unavailable (bead jhw; was assert) */
+             if (arbsdp_problem_b(beta_b, p, covered[b] - 1, prec) != 0) {
+@@ -1649,6 +1700,21 @@ arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
+     }
+ }
+ 
++int
++arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
++                          const arbsdp_iterate *it, slong prec)
++{
++    assert(lb_out != NULL && p != NULL && it != NULL
++           && "primal_lower_bound: lb_out, p, it non-NULL");
++
++    /* MAXIMIZE GUARD (agc, kept by fjw): this PUBLIC routine promises a LOWER
++     * bound on a MAX optimum; for a MIN a feasible point is an UPPER bound.  The
++     * minimize bracket uses primal_lower_bound_frame(sigma=-1) on the upper side. */
++    if (!sense_is_max(p, "arbsdp_primal_lower_bound"))
++        return 0;
++    return primal_lower_bound_frame(lb_out, p, +1, it, prec);
++}
++
+ /* ---------------------------------------------------------------------------
+  * arbsdp_certify_bracket -- THE PRODUCT (bead arb-prec-IPM-b19): the rigorous
+  * [lb, ub] with lb <= p*_ext <= ub (MATH_SPEC §5.4 + §5.5).  certify.h contract.
+@@ -1663,6 +1729,16 @@ arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
+  *
+  * lb is taken at the ball's LOWER endpoint and ub at its UPPER endpoint, so the
+  * SCALAR interval [lb, ub] rigorously contains p*_ext even after ball rounding.
++ *
++ * OBJECTIVE SENSE (bead fjw, MATH_SPEC §5.8): everything above is computed for
++ * the MAX-FRAME problem p*_frame = max <sigma*C_file, X> (objective_sign) and the
++ * scalar frame interval [lo, hi] is mapped back ONCE at the end:
++ *     maximize (sigma=+1): [lb, ub] = [lo, hi]        (p*_user =  p*_frame)
++ *     minimize (sigma=-1): [lb, ub] = [-hi, -lo]      (p*_user = -p*_frame)
++ * Negating an arf is exact, so the minimize bracket is exactly as rigorous as the
++ * max-frame one.  For a minimize problem the feasible-point (Rayleigh) bound thus
++ * lands on the user's UPPER side and the dual-residual lambda_min bound (the
++ * frame's -hi) on the LOWER side -- the mirror of max.
+  * ------------------------------------------------------------------------- */
+ arbsdp_certify_status
+ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
+@@ -1674,6 +1750,7 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
+     arb_t lb_ball, ub_ball;
+     arf_t lo, hi;
+     arbsdp_certify_status status;
++    int sigma;
+ 
+     assert(p != NULL && it != NULL && ab != NULL
+            && "certify_bracket: p, it, ab non-NULL");
+@@ -1683,14 +1760,7 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
+            && "certify_bracket: it->nblocks != p->nblocks");
+     assert(it->m == p->m && "certify_bracket: it->m != p->m");
+ 
+-    /* MAXIMIZE GUARD (agc): the bracket below is the external-MAX bracket (sign
+-     * locus, oc7 primal tightening).  A minimize problem gets the honest
+-     * [-inf, +inf] + INCONCLUSIVE, never a wrong-objective "rigorous" bracket. */
+-    if (!sense_is_max(p, "arbsdp_certify_bracket")) {
+-        arb_neg_inf(lb);
+-        arb_pos_inf(ub);
+-        return ARBSDP_CERTIFY_INCONCLUSIVE;
+-    }
++    sigma = objective_sign(p);   /* the ONE sense decision (bead fjw) */
+ 
+     /* TAU GUARD (rule 5): an unhealthy tau means the HSDE iterate is on the
+      * infeasibility path (b20), not an approximate optimum.  Do NOT purify or
+@@ -1716,7 +1786,11 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
+ 
+     m = p->m;
+ 
+-    /* --- THE P0 SIGN LOCUS: y_ext = -(it->y / it->tau), formed ONCE. --------- */
++    /* --- THE P0 SIGN LOCUS: y_ext = -(it->y / it->tau), formed ONCE. ---------
++     * Sense-independent (bead fjw): the iterate solves min <C_int,X> with C_int =
++     * -C_frame for BOTH senses, so its internal dual y_int = y/tau satisfies
++     * S/tau = C_int - sum y_int A_i = -(C_frame - sum (-y_int) A_i), i.e. the
++     * near-optimal dual of the max-frame problem is y_ext = -y_int either way. */
+     y_ext = NULL;
+     if (m > 0) {
+         y_ext = _arb_vec_init(m);
+@@ -1732,8 +1806,8 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
+     arb_init(lb_ball);
+     arb_init(ub_ball);
+ 
+-    arbsdp_lower_bound(lb_ball, p, y_ext, ab, prec_c);
+-    arbsdp_upper_bound(ub_ball, p, y_ext, ab, prec_c);
++    lower_bound_frame(lb_ball, p, sigma, y_ext, ab, prec_c);
++    upper_bound_frame(ub_ball, p, sigma, y_ext, ab, prec_c);
+ 
+     /* Take lb at the LOWER endpoint and ub at the UPPER endpoint of the assembled
+      * balls (the rigorous scalar interval).  arf +/-inf flows through verbatim. */
+@@ -1748,7 +1822,7 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
+     {
+         arb_t lb_primal;
+         arb_init(lb_primal);
+-        if (arbsdp_primal_lower_bound(lb_primal, p, it, prec_c)) {
++        if (primal_lower_bound_frame(lb_primal, p, sigma, it, prec_c)) {
+             arf_t lo_p;
+             arf_init(lo_p);
+             arb_get_lbound_arf(lo_p, lb_primal, prec_c);
+@@ -1759,8 +1833,18 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
+         arb_clear(lb_primal);
+     }
+     arb_get_ubound_arf(hi, ub_ball, prec_c);
+-    arb_set_arf(lb, lo);
+-    arb_set_arf(ub, hi);
++    /* Map the max-frame interval back to the user's sense (MATH_SPEC §5.8).
++     * arf negation is exact; +/-inf map to -/+inf (an honest infinite side of
++     * the frame stays an honest infinite side of the user bracket). */
++    if (sigma > 0) {
++        arb_set_arf(lb, lo);
++        arb_set_arf(ub, hi);
++    } else {
++        arf_neg(hi, hi);
++        arf_neg(lo, lo);
++        arb_set_arf(lb, hi);     /* lb = -hi_frame */
++        arb_set_arf(ub, lo);     /* ub = -lo_frame */
++    }
+     arf_clear(lo);
+     arf_clear(hi);
+ 
+@@ -1917,14 +2001,16 @@ arbsdp_verify_dual_infeasible(const arbsdp_problem *p, const arbsdp_iterate *it,
+      * idiom as the oc7 detector), never a tolerance.  "(C_file^b)_{kk} > 0" is the
+      * rigorous LOWER endpoint strictly positive (arf_sgn(lbound) > 0). */
+     int nb;
++    int sigma;
+ 
+     assert(p != NULL && it != NULL && "verify_dual_infeasible: p, it non-NULL");
+ 
+-    /* MAXIMIZE GUARD (agc): <C_file,E_kk> > 0 makes E_kk an UNBOUNDED ray only
+-     * for a MAX; for a MIN it is an improving-away direction (a minimize problem
+-     * with such a ray can be bounded and dual-feasible).  Not certified -> 0. */
+-    if (!sense_is_max(p, "arbsdp_verify_dual_infeasible"))
+-        return 0;
++    /* OBJECTIVE SENSE (bead fjw, MATH_SPEC §5.8): E_kk is an unbounded-
++     * improvement ray iff <C_frame, E_kk> = sigma*(C_file)_kk > 0, i.e.
++     * (C_file)_kk > 0 for a MAX and (C_file)_kk < 0 for a MIN (min <C,X> -> -inf
++     * along the ray).  A <C_file,E_kk> > 0 coordinate of a MIN is an improving-
++     * AWAY direction and must NOT fire (bead agc trap). */
++    sigma = objective_sign(p);
+ 
+     nb = it->nblocks;
+     if (nb <= 0)
+@@ -1956,15 +2042,18 @@ arbsdp_verify_dual_infeasible(const arbsdp_problem *p, const arbsdp_iterate *it,
+                     zero_ok[k] = 0;
+         }
+ 
+-        /* (b) among the survivors, a strictly positive C_file^b diagonal is the
+-         * unbounded-improvement witness -> dual infeasible.  Reuse M for C_file^b. */
++        /* (b) among the survivors, a strictly positive C_frame^b diagonal is the
++         * unbounded-improvement witness -> dual infeasible.  Reuse M for
++         * C_frame^b = sigma * C_file^b (exact negation for a minimize problem). */
+         arf_init(lo);
+         arbsdp_problem_block_mat(M, p, /*matno=*/0, /*block=*/b, prec);     /* C_file^b */
++        if (sigma < 0)
++            arb_mat_neg(M, M);                                              /* C_frame^b */
+         for (slong k = 0; k < n; k++) {
+             if (!zero_ok[k])
+                 continue;
+             arb_get_lbound_arf(lo, arb_mat_entry(M, k, k), prec);
+-            if (arf_sgn(lo) > 0) {   /* (C_file^b)_{kk} > 0, rigorous lower endpoint */
++            if (arf_sgn(lo) > 0) {   /* (C_frame^b)_{kk} > 0, rigorous lower endpoint */
+                 hit = 1;
+                 break;
+             }
+@@ -2012,17 +2101,9 @@ arbsdp_certify(arb_t lb, arb_t ub, const arbsdp_problem *p,
+         arb_pos_inf(ub);
+         return ARBSDP_CERTIFY_PRIMAL_INFEASIBLE;
+     }
+-    /* MAXIMIZE GUARD (agc).  The primal Farkas test above is SENSE-INDEPENDENT
+-     * (MATH_SPEC §5.7.1: sum_i y_i A_i <= 0 and b^T y > 0 refute the feasible set
+-     * {X >= 0 : <A_i,X> = b_i}; C and the sense never enter), so it stays valid
+-     * for a minimize problem.  The dual-infeasibility ray (§5.7.2) and the
+-     * bracket (§5.4/§5.5) are external-MAX results: refuse them here (one
+-     * diagnostic) with the honest [-inf, +inf] + INCONCLUSIVE. */
+-    if (!sense_is_max(p, "arbsdp_certify")) {
+-        arb_neg_inf(lb);
+-        arb_pos_inf(ub);
+-        return ARBSDP_CERTIFY_INCONCLUSIVE;
+-    }
++    /* OBJECTIVE SENSE (bead fjw).  The primal Farkas test above is SENSE-
++     * INDEPENDENT (MATH_SPEC §5.7.1: C never enters); the dual-infeasibility ray
++     * and the bracket below are sense-aware through objective_sign (§5.8). */
+     if (arbsdp_verify_dual_infeasible(p, it, prec_c)) {
+         arb_neg_inf(lb);
+         arb_pos_inf(ub);
+diff --git a/c/test/test_certify_bracket.c b/c/test/test_certify_bracket.c
+index a39c3a1..52f0a75 100644
+--- a/c/test/test_certify_bracket.c
++++ b/c/test/test_certify_bracket.c
+@@ -1143,6 +1143,301 @@ test_detector_rejects_coupled(const golden_case *cases, int n)
+     }
+ }
+ 
++/* ==========================================================================
++ * MINIMIZE CERTIFICATION (bead arb-prec-IPM-fjw; MATH_SPEC §5.8).
++ *
++ * Layer 1 certifies min <C,X> through the MAX-FRAME reduction
++ *     min <C_file,X> = -max <-C_file,X>,
++ * bracketing the max-frame problem and mapping [lb', ub'] -> [-ub', -lb'].  For a
++ * minimize problem the FEASIBLE-POINT (Rayleigh) bound therefore lands on the
++ * UPPER side and the dual-residual bound on the LOWER side -- the mirror of max.
++ * ======================================================================== */
++
++/* solve_case_sense -- like solve_to_iterate but honouring the provenance sense
++ * (read_sdpa hardcodes maximize = 1; io.c) and target digits.  Returns prec_c. */
++static slong
++solve_case_sense(arbsdp_problem *p, arbsdp_adaptive_result *r,
++                 const golden_case *c, int target_digits)
++{
++    arbsdp_problem_init(p);
++    CHECK(arbsdp_read_sdpa(p, c->dats_path) == 0, "solve_case_sense: read_sdpa");
++    p->maximize = c->maximize;
++
++    arbsdp_precision_params pp;
++    arbsdp_precision_default_params(&pp);
++    pp.target_digits = target_digits;
++    if (c->prec_cap > pp.prec_max)
++        pp.prec_max = c->prec_cap;
++    arbsdp_solve_adaptive(r, p, &pp);
++    return r->final_prec + 128;
++}
++
++/* negate_objective -- C_file -> -C_file on every stored entry string of matno 0,
++ * and flip the sense: the result is the SAME optimization problem written the
++ * other way round (max <C,X> == -min <-C,X>).  Exact on the decimal strings (a
++ * leading '-' is dropped / added), so the materialized balls are exact negations. */
++static void
++negate_objective(arbsdp_problem *p)
++{
++    for (int b = 0; b < p->nblocks; b++) {
++        arbsdp_matblock *mb = &p->mats[0 * p->nblocks + b];
++        for (int e = 0; e < mb->count; e++) {
++            char *v = mb->entries[e].value;
++            size_t len = strlen(v);
++            char *w = malloc(len + 2);
++            CHECK(w != NULL, "negate_objective: malloc");
++            if (w == NULL)
++                return;
++            if (v[0] == '-')
++                memcpy(w, v + 1, len);            /* "-x" -> "x" (incl. NUL)  */
++            else if (v[0] == '+') {
++                w[0] = '-';
++                memcpy(w + 1, v + 1, len);        /* "+x" -> "-x"             */
++            } else {
++                w[0] = '-';
++                memcpy(w + 1, v, len + 1);        /* "x"  -> "-x"             */
++            }
++            free(v);
++            mb->entries[e].value = w;
++        }
++    }
++    p->maximize = !p->maximize;
++}
++
++/* one_sided_digits -- -log10(d) for a gap d >= 0 (diagnostic; 999 if d == 0). */
++static double
++gap_digits(const arb_t d)
++{
++    double v = arf_get_d(arb_midref(d), ARF_RND_UP);
++    if (v <= 0.0)
++        return 999.0;
++    return -log10(v);
++}
++
++/* --------------------------------------------------------------------------
++ * (b) min_eig_path_4 (target 30) and min_eig_path_4_td120 (target 120): min
++ * <T_4(2,1),X>, tr X = 1, opt = lambda_min = (3 - sqrt5)/2.  xbar = 1 (A_1 = I,
++ * b_1 = 1 pins tr X = 1).  RIGOR against the closed form at CMP_PREC bits AND the
++ * provenance enclosure; TIGHTNESS on BOTH sides (opt - lb and ub - opt) at
++ * gate_digits.  Before fjw: INCONCLUSIVE [-inf, +inf] (agc refusal).
++ * ----------------------------------------------------------------------- */
++static void
++test_minimize_goldens(const golden_case *cases, int n)
++{
++    /* gate_digits: MEASURED (fjw, prec_c = final_prec + 128) opt-lb / ub-opt =
++     * 189.7 / 166.6 digits (td30, prec_c=640) and 323.3 / 323.3 (td120,
++     * prec_c=2176); the gates sit well below with margin for Layer-0 drift but far
++     * above anything a wrong-side or wrong-sign bound can reach (O(1) gaps). */
++    static const struct { const char *name; int gate_digits; } mg[] = {
++        { "min_eig_path_4",       60 },
++        { "min_eig_path_4_td120", 200 },
++    };
++    int nm = (int) (sizeof mg / sizeof mg[0]);
++
++    printf("\nMINIMIZE GOLDENS (fjw): opt=(3-sqrt5)/2 MUST be in [lb,ub], both sides tight:\n");
++    for (int k = 0; k < nm; k++) {
++        const golden_case *c = find_case(cases, n, mg[k].name);
++        CHECK(c != NULL, "minimize_goldens: golden discovered");
++        if (c == NULL)
++            continue;
++        CHECK(c->maximize == 0, "minimize_goldens: provenance says minimize");
++
++        arbsdp_problem p;
++        arbsdp_adaptive_result r;
++        slong prec_c = solve_case_sense(&p, &r, c, c->target_digits);
++
++        arbsdp_apriori ab;
++        arbsdp_apriori_init(&ab, p.nblocks);
++        {
++            arb_t one; arb_init(one); arb_one(one);
++            arbsdp_apriori_set_xbar(&ab, 0, one);
++            arb_clear(one);
++        }
++
++        arb_t lb, ub, opt_cf, opt_enc, glo, ghi, tol;
++        arb_init(lb); arb_init(ub); arb_init(opt_cf); arb_init(opt_enc);
++        arb_init(glo); arb_init(ghi); arb_init(tol);
++
++        /* closed form (3 - sqrt5)/2 at CMP_PREC (radius ~2^-4096). */
++        arb_set_ui(opt_cf, 5);
++        arb_sqrt(opt_cf, opt_cf, CMP_PREC);
++        arb_neg(opt_cf, opt_cf);
++        arb_add_ui(opt_cf, opt_cf, 3, CMP_PREC);
++        arb_mul_2exp_si(opt_cf, opt_cf, -1);
++        parse_opt_enclosure(opt_enc, c, CMP_PREC);
++        CHECK(arb_overlaps(opt_cf, opt_enc),
++              "minimize_goldens: closed form agrees with the provenance value");
++
++        arbsdp_certify_status st =
++            arbsdp_certify_bracket(lb, ub, &p, &r.res.it, &ab, prec_c);
++        CHECK(st == ARBSDP_CERTIFY_OPTIMAL_BRACKET,
++              "minimize_goldens: status OPTIMAL_BRACKET");
++
++        /* RIGOR (rule 2): the TRUE optimum inside [lb, ub]. */
++        CHECK(arb_le(lb, opt_cf), "minimize_goldens: lb <= (3-sqrt5)/2 (P0 if not)");
++        CHECK(arb_le(opt_cf, ub), "minimize_goldens: (3-sqrt5)/2 <= ub (P0 if not)");
++        CHECK(arb_le(lb, opt_enc) || arb_overlaps(lb, opt_enc),
++              "minimize_goldens: lb <= ubound(provenance enclosure)");
++
++        /* TIGHTNESS on BOTH sides. */
++        arb_sub(glo, opt_cf, lb, CMP_PREC);
++        arb_sub(ghi, ub, opt_cf, CMP_PREC);
++        {
++            arb_t ten;
++            arb_init(ten);
++            arb_set_ui(ten, 10);
++            arb_pow_ui(tol, ten, (ulong) mg[k].gate_digits, CMP_PREC);
++            arb_inv(tol, tol, CMP_PREC);
++            arb_clear(ten);
++        }
++        CHECK(arb_lt(glo, tol), "minimize_goldens: opt - lb < 10^-gate (dual side tight)");
++        CHECK(arb_lt(ghi, tol), "minimize_goldens: ub - opt < 10^-gate (primal side tight)");
++
++        {
++            char *slb = arb_get_str(lb, 25, ARB_STR_NO_RADIUS);
++            char *sub = arb_get_str(ub, 25, ARB_STR_NO_RADIUS);
++            printf("  %-22s td=%d prec_c=%ld lb=%s ub=%s digits(opt-lb)=%.1f "
++                   "digits(ub-opt)=%.1f gate=%d\n",
++                   mg[k].name, c->target_digits, (long) prec_c, slb, sub,
++                   gap_digits(glo), gap_digits(ghi), mg[k].gate_digits);
++            flint_free(slb);
++            flint_free(sub);
++        }
++
++        arb_clear(lb); arb_clear(ub); arb_clear(opt_cf); arb_clear(opt_enc);
++        arb_clear(glo); arb_clear(ghi); arb_clear(tol);
++        arbsdp_apriori_clear(&ab);
++        arbsdp_adaptive_result_clear(&r);
++        arbsdp_problem_clear(&p);
++    }
++}
++
++/* --------------------------------------------------------------------------
++ * (c) NEGATION CROSS-CHECK of the reduction: for every max bracket golden of
++ * the rigor gate, the minimize problem with C negated is the same problem
++ * written the other way round, so its certified bracket must be EXACTLY the
++ * negated max bracket [-ub, -lb].
++ *   (c1) SAME iterate: the Layer-0 iterate of the max problem is a valid iterate
++ *        of the negated min problem (both solve min <C_int,X> with the same
++ *        C_int = -C_file_max = C_file_min; iterate.c), so certifying the min
++ *        problem from it must give the bit-exact negation.
++ *   (c2) INDEPENDENT solve of the min problem (end-to-end through Layer 0): the
++ *        bracket must contain -opt and agree with the negation within 2^-(prec_c-64).
++ * ----------------------------------------------------------------------- */
++static void
++test_min_negation_crosscheck(const golden_case *cases, int n)
++{
++    static const struct { const char *name; const char *xbar; } nc[] = {
++        { "max_eigenvalue_2x2", "1" },  { "max_eig_tridiag_3x3", "1" },
++        { "max_eig_path_4", "1" },      { "max_eig_path_8", "1" },
++        { "max_eig_path_16", "1" },     { "separable_12block", "1" },
++        { "two_block_corr_coupled", "3" },
++    };
++    int nn = (int) (sizeof nc / sizeof nc[0]);
++
++    printf("\nMIN NEGATION CROSS-CHECK (fjw): min<-C,X> bracket == -(max<C,X> bracket):\n");
++    for (int k = 0; k < nn; k++) {
++        const golden_case *c = find_case(cases, n, nc[k].name);
++        CHECK(c != NULL, "negation: golden discovered");
++        if (c == NULL)
++            continue;
++
++        arbsdp_problem p1, p2;
++        arbsdp_adaptive_result r1, r2;
++        slong prec_c = solve_to_iterate(&p1, &r1, c);           /* max <C,X> */
++
++        arbsdp_problem_init(&p2);
++        CHECK(arbsdp_read_sdpa(&p2, c->dats_path) == 0, "negation: read_sdpa");
++        negate_objective(&p2);                                   /* min <-C,X> */
++        CHECK(p2.maximize == 0, "negation: p2 is a minimize problem");
++
++        arbsdp_apriori ab;
++        arbsdp_apriori_init(&ab, p1.nblocks);
++        {
++            arb_t v; arb_init(v);
++            arb_set_str(v, nc[k].xbar, prec_c);
++            for (int b = 0; b < p1.nblocks; b++)
++                arbsdp_apriori_set_xbar(&ab, b, v);
++            arb_clear(v);
++        }
++
++        arb_t lb1, ub1, lb2, ub2, nlb1, nub1, opt, nopt, d, tol;
++        arb_init(lb1); arb_init(ub1); arb_init(lb2); arb_init(ub2);
++        arb_init(nlb1); arb_init(nub1); arb_init(opt); arb_init(nopt);
++        arb_init(d); arb_init(tol);
++
++        arbsdp_certify_status s1 =
++            arbsdp_certify_bracket(lb1, ub1, &p1, &r1.res.it, &ab, prec_c);
++        arb_neg(nlb1, lb1);
++        arb_neg(nub1, ub1);
++
++        /* (c1) same iterate -> bit-exact negation. */
++        arbsdp_certify_status s2 =
++            arbsdp_certify_bracket(lb2, ub2, &p2, &r1.res.it, &ab, prec_c);
++        CHECK(s1 == ARBSDP_CERTIFY_OPTIMAL_BRACKET && s2 == s1,
++              "negation(c1): both OPTIMAL_BRACKET");
++        CHECK(arb_equal(lb2, nub1), "negation(c1): lb_min == -ub_max (bit-exact)");
++        CHECK(arb_equal(ub2, nlb1), "negation(c1): ub_min == -lb_max (bit-exact)");
++
++        /* (c2) independent min solve. */
++        {
++            arbsdp_precision_params pp;
++            arbsdp_precision_default_params(&pp);
++            pp.target_digits = 15;
++            arbsdp_solve_adaptive(&r2, &p2, &pp);
++        }
++        slong prec_c2 = r2.final_prec + 128;
++        arbsdp_certify_status s3 =
++            arbsdp_certify_bracket(lb2, ub2, &p2, &r2.res.it, &ab, prec_c2);
++        CHECK(s3 == ARBSDP_CERTIFY_OPTIMAL_BRACKET, "negation(c2): OPTIMAL_BRACKET");
++        parse_opt_enclosure(opt, c, CMP_PREC);
++        arb_neg(nopt, opt);
++        {
++            arf_t o_lo, o_hi, l, u;
++            arf_init(o_lo); arf_init(o_hi); arf_init(l); arf_init(u);
++            arb_get_lbound_arf(o_lo, nopt, CMP_PREC);
++            arb_get_ubound_arf(o_hi, nopt, CMP_PREC);
++            arb_get_lbound_arf(l, lb2, CMP_PREC);
++            arb_get_ubound_arf(u, ub2, CMP_PREC);
++            CHECK(arf_cmp(l, o_hi) <= 0, "negation(c2): lb_min <= -opt (P0 if not)");
++            CHECK(arf_cmp(o_lo, u) <= 0, "negation(c2): -opt <= ub_min (P0 if not)");
++            arf_clear(o_lo); arf_clear(o_hi); arf_clear(l); arf_clear(u);
++        }
++        /* agreement within ball rounding: |x2 - (-x1)| <= 2^-(prec_c-64) * max(1,|x1|) */
++        arb_one(tol);
++        {
++            arb_t a; arb_init(a);
++            arb_abs(a, ub1);
++            if (arb_gt(a, tol)) arb_set(tol, a);
++            arb_clear(a);
++        }
++        arb_mul_2exp_si(tol, tol, -(prec_c - 64));
++        arb_sub(d, lb2, nub1, CMP_PREC); arb_abs(d, d);
++        CHECK(arb_le(d, tol), "negation(c2): lb_min ~= -ub_max");
++        int exact_lo = arb_equal(lb2, nub1);
++        arb_sub(d, ub2, nlb1, CMP_PREC); arb_abs(d, d);
++        CHECK(arb_le(d, tol), "negation(c2): ub_min ~= -lb_max");
++        int exact_hi = arb_equal(ub2, nlb1);
++
++        {
++            char *a = arb_get_str(lb2, 12, ARB_STR_NO_RADIUS);
++            char *b = arb_get_str(ub2, 12, ARB_STR_NO_RADIUS);
++            printf("  %-22s min-bracket=[%s, %s]  c2 bit-exact=%s\n",
++                   nc[k].name, a, b, (exact_lo && exact_hi) ? "yes" : "no");
++            flint_free(a); flint_free(b);
++        }
++
++        arb_clear(lb1); arb_clear(ub1); arb_clear(lb2); arb_clear(ub2);
++        arb_clear(nlb1); arb_clear(nub1); arb_clear(opt); arb_clear(nopt);
++        arb_clear(d); arb_clear(tol);
++        arbsdp_apriori_clear(&ab);
++        arbsdp_adaptive_result_clear(&r2);
++        arbsdp_adaptive_result_clear(&r1);
++        arbsdp_problem_clear(&p2);
++        arbsdp_problem_clear(&p1);
++    }
++}
++
+ int main(void)
+ {
+     golden_case cases[MAX_CASES];
+@@ -1161,6 +1456,8 @@ int main(void)
+     test_tight_lb_primal(cases, n);
+     test_separable_primal_tight(cases, n);
+     test_detector_rejects_coupled(cases, n);
++    test_minimize_goldens(cases, n);
++    test_min_negation_crosscheck(cases, n);
+ 
+     /* Free FLINT's thread-local caches (fmpz pool, arf scratch, registered
+      * cleanup hooks) so valgrind reports no possibly-lost / reachable
+diff --git a/c/test/test_farkas.c b/c/test/test_farkas.c
+index 19eddd3..aa6213f 100644
+--- a/c/test/test_farkas.c
++++ b/c/test/test_farkas.c
+@@ -547,35 +547,43 @@ test_feasible_no_misfire_battery(void)
+ }
+ 
+ /* ==========================================================================
+- * test_minimize_refused -- bead arb-prec-IPM-agc (REVIEW F3): the MAXIMIZE
+- * GUARD.  Layer 1 is derived for the EXTERNAL MAX problem only (MATH_SPEC §5.4,
+- * §5.5, §5.7.2; certify.h).  A minimize problem (p->maximize == 0) must NEVER
+- * receive a certifying status from an objective-sense-dependent entry point --
+- * a wrong-objective "rigorous" bracket / recession-ray verdict is the worst
+- * possible output (CLAUDE.md rule 2/5).  The real minimize certification is
+- * bead arb-prec-IPM-fjw; until it lands the honest answer is INCONCLUSIVE.
++ * test_minimize_certified -- bead arb-prec-IPM-fjw (supersedes the agc refusal
++ * test).  Layer 1 certifies a minimize problem through the MAX-FRAME REDUCTION
++ * (MATH_SPEC §5.8): min <C,X> = -max <-C,X>; the bracket of the max-frame
++ * problem [lb', ub'] maps to [-ub', -lb'], and the coordinate recession ray of
++ * §5.7.2 must have <C_file,X_hat> < 0 (i.e. <-C_file,X_hat> > 0).
+  *
+  * (A) min_trace_diag13: C = diag(1,3), tr X = 1 (2x2 PSD).  min = 1 (X = E_11),
+- *     max = 3.  Solved as MINIMIZE.  Without the guard the oc7 primal Rayleigh
+- *     tightening (a FEASIBLE point's objective, a lower bound only for a MAX)
+- *     sets lb = <C, X_hat> >= 1 = the true min, so the "bracket" can EXCLUDE
+- *     the minimize optimum.  Asserted: certify_bracket and certify return
+- *     INCONCLUSIVE with [-inf, +inf]; primal_lower_bound returns 0.
+- *     CONTROL (the test is not vacuous): the same data with maximize = 1 gives
+- *     OPTIMAL_BRACKET containing 3.
++ *     max = 3.  Solved as MINIMIZE.  certify_bracket and certify must return
++ *     OPTIMAL_BRACKET with lb <= 1 <= ub AND a TIGHT bracket (ub - lb < 1e-30):
++ *     the loose all-sides Jansson bracket of this problem is [1, 3] (dual side
++ *     stuck at lambda_max for a min, see MATH_SPEC §5.8), so a tight bracket
++ *     proves the feasible-point (Rayleigh) bound landed on the UPPER side.  A
++ *     wrong-side primal bound (lb := <C,X_hat> >= 1) would make lb > 1 -- caught
++ *     by the containment check against the exact optimum 1.  The PUBLIC
++ *     arbsdp_primal_lower_bound keeps its refusal on a minimize problem (its
++ *     contract is a LOWER bound on a MAX; for a min a feasible point gives an
++ *     UPPER bound, applied inside certify_bracket) -> returns 0.
++ *     CONTROL (unchanged max behavior): the same data with maximize = 1 gives
++ *     OPTIMAL_BRACKET containing 3 and primal_lower_bound = 1.
+  * (B) min_free_coord: min X_22 s.t. X_11 = 1 (2x2 PSD; C = diag(0,1)).  BOUNDED
+  *     (opt 0) and dual-feasible (y = 0 gives C >= 0).  E_22 is a recession ray
+  *     with <C,E_22> = +1 > 0 -- an UNBOUNDED direction for a MAX, an IMPROVING-
+- *     AWAY direction for a MIN.  Without the guard verify_dual fires 1 and
+- *     certify reports DUAL_INFEASIBLE: a FALSE infeasibility certificate.
+- *     Asserted: verify_dual == 0, certify == INCONCLUSIVE.  CONTROL: the same
+- *     data with maximize = 1 (max X_22, genuinely unbounded) gives verify_dual 1.
++ *     AWAY direction for a MIN.  verify_dual MUST be 0 and certify must NOT report
++ *     an infeasibility status (a false DUAL_INFEASIBLE is the agc trap).  With
++ *     xbar unset tr X is a-priori unbounded, so any finite bracket must contain 0.
++ *     CONTROL: the same data with maximize = 1 (max X_22, genuinely unbounded)
++ *     gives verify_dual 1.
++ * (D) min_unbounded_coord: min <-E_22, X> s.t. X_11 = 1 (C = diag(0,-1)).
++ *     UNBOUNDED BELOW (X_22 -> +inf), so the dual is infeasible; E_22 is a
++ *     recession ray with <C,E_22> = -1 < 0.  verify_dual MUST be 1 and certify
++ *     MUST report DUAL_INFEASIBLE.  CONTROL: as a MAX (max -X_22, bounded at 0)
++ *     the same data gives verify_dual 0.
+  * (C) SENSE-INDEPENDENCE of the primal Farkas test (§5.7.1): primal
+  *     infeasibility is a property of {X >= 0 : <A_i,X> = b_i} alone; the
+  *     certificate (sum y_i A_i <= 0, b^T y > 0) never reads C or the sense.  So
+  *     primal_infeasible_psd with maximize flipped to 0 must STILL verify, and
+- *     arbsdp_certify must still report PRIMAL_INFEASIBLE (the guard must not
+- *     over-refuse a valid sense-free theorem).
++ *     arbsdp_certify must still report PRIMAL_INFEASIBLE.
+  * ======================================================================== */
+ static const char DATS_MIN_TRACE[] =
+     "* min_trace_diag13: opt C=diag(1,3) s.t. tr X = 1 (min 1, max 3).\n"
+@@ -597,6 +605,15 @@ static const char DATS_MIN_FREE_COORD[] =
+     "0 1 2 2 1.0\n"
+     "1 1 1 1 1.0\n";
+ 
++static const char DATS_MIN_UNBOUNDED_COORD[] =
++    "* min_unbounded_coord: opt -X_22 s.t. X_11 = 1 (min unbounded; max 0).\n"
++    "1\n"
++    "1\n"
++    "2\n"
++    "1.0\n"
++    "0 1 2 2 -1.0\n"
++    "1 1 1 1 1.0\n";
++
+ /* Load embedded `contents` into p with the given sense, solve at SOLVE_PREC. */
+ static int
+ load_and_solve_sense(arbsdp_problem *p, arbsdp_result *res, const char *tag,
+@@ -621,11 +638,11 @@ load_and_solve_sense(arbsdp_problem *p, arbsdp_result *res, const char *tag,
+ }
+ 
+ static void
+-test_minimize_refused(void)
++test_minimize_certified(void)
+ {
+     char path[256];
+ 
+-    printf("\nMINIMIZE GUARD (bead agc: maximize=0 must NOT be certified):\n");
++    printf("\nMINIMIZE CERTIFICATION (bead fjw: max-frame reduction, MATH_SPEC §5.8):\n");
+ 
+     /* ---- (A) bracket path ------------------------------------------------ */
+     for (int maximize = 0; maximize <= 1; maximize++) {
+@@ -640,57 +657,64 @@ test_minimize_refused(void)
+         }
+ 
+         arbsdp_apriori ab;
+-        arb_t lb, ub, one, lbp, opt;
++        arb_t lb, ub, one, lbp, opt, gap, tol;
+         arbsdp_apriori_init(&ab, p.nblocks);
+         arb_init(lb); arb_init(ub); arb_init(one); arb_init(lbp); arb_init(opt);
++        arb_init(gap); arb_init(tol);
+         arb_one(one);
+         arbsdp_apriori_set_xbar(&ab, 0, one);   /* tr X = 1 exactly */
++        arb_set_si(opt, maximize ? 3 : 1);      /* exact optimum of the sense */
++        arb_set_str(tol, "1e-30", VERIFY_PREC);
+ 
+         arbsdp_certify_status csb =
+             arbsdp_certify_bracket(lb, ub, &p, &res.it, &ab, VERIFY_PREC);
++        arb_sub(gap, ub, lb, VERIFY_PREC);
+         {
+             char *slb = arb_get_str(lb, 20, 0);
+             char *sub = arb_get_str(ub, 20, 0);
+-            printf("  %-24s solve=%s certify_bracket=%s lb=%s ub=%s\n", lbl,
++            char *sg  = arb_get_str(gap, 5, ARB_STR_NO_RADIUS);
++            printf("  %-24s solve=%s certify_bracket=%s lb=%s ub=%s ub-lb=%s\n", lbl,
+                    solve_status_name(res.status), certify_status_name(csb),
+-                   slb, sub);
++                   slb, sub, sg);
+             flint_free(slb);
+             flint_free(sub);
++            flint_free(sg);
+         }
+-        arbsdp_certify_status cs =
+-            arbsdp_certify(lb, ub, &p, &res.it, &ab, VERIFY_PREC);
+-        int plb = arbsdp_primal_lower_bound(lbp, &p, &res.it, VERIFY_PREC);
++        expect_int((int) res.status, (int) ARBSDP_SOLVE_OPTIMAL, lbl,
++                   "solve.status");
++        expect_int((int) csb, (int) ARBSDP_CERTIFY_OPTIMAL_BRACKET, lbl,
++                   "certify_bracket");
++        /* RIGOR: the exact optimum of THIS sense is inside (rule 2). */
++        expect_int(arb_le(lb, opt) && arb_le(opt, ub), 1, lbl, "lb<=opt<=ub");
++        /* TIGHTNESS: both sides, so neither the dual-only [1,3] nor a wrong-side
++         * primal bound can pass. */
++        expect_int(arb_lt(gap, tol), 1, lbl, "ub-lb<1e-30");
+ 
+-        if (!maximize) {
+-            expect_int((int) res.status, (int) ARBSDP_SOLVE_OPTIMAL, lbl,
+-                       "solve.status");
+-            expect_int((int) csb, (int) ARBSDP_CERTIFY_INCONCLUSIVE, lbl,
+-                       "certify_bracket");
+-            expect_int((int) cs, (int) ARBSDP_CERTIFY_INCONCLUSIVE, lbl,
+-                       "certify.status");
+-            expect_int(arb_is_finite(lb) || arb_is_finite(ub), 0, lbl,
+-                       "lb/ub finite");
+-            expect_int(plb, 0, lbl, "primal_lower_bnd");
+-        } else {
+-            /* CONTROL: max opt = 3 must be bracketed (the guard is sense-gated,
+-             * not a blanket refusal). */
+-            arb_set_si(opt, 3);
++        {
++            arb_t lb2, ub2;
++            arb_init(lb2); arb_init(ub2);
++            arbsdp_certify_status cs =
++                arbsdp_certify(lb2, ub2, &p, &res.it, &ab, VERIFY_PREC);
+             expect_int((int) cs, (int) ARBSDP_CERTIFY_OPTIMAL_BRACKET, lbl,
+                        "certify.status");
+-            expect_int(arb_le(lb, opt) && arb_le(opt, ub), 1, lbl,
+-                       "lb<=3<=ub");
+-            expect_int(plb, 1, lbl, "primal_lower_bnd");
++            expect_int(arb_equal(lb2, lb) && arb_equal(ub2, ub), 1, lbl,
++                       "certify==bracket");
++            arb_clear(lb2); arb_clear(ub2);
+         }
+ 
++        /* Public primal_lower_bound: a LOWER bound on a MAX only (kept guard). */
++        int plb = arbsdp_primal_lower_bound(lbp, &p, &res.it, VERIFY_PREC);
++        expect_int(plb, maximize ? 1 : 0, lbl, "primal_lower_bnd");
++
+         arb_clear(lb); arb_clear(ub); arb_clear(one); arb_clear(lbp);
+-        arb_clear(opt);
++        arb_clear(opt); arb_clear(gap); arb_clear(tol);
+         arbsdp_apriori_clear(&ab);
+         arbsdp_result_clear(&res);
+         arbsdp_problem_clear(&p);
+         remove(path);
+     }
+ 
+-    /* ---- (B) dual-infeasibility (recession-ray) path -------------------- */
++    /* ---- (B) bounded min with a <C,E_kk> > 0 coordinate ray ------------- */
+     {
+         arbsdp_problem p;
+         arbsdp_result  res;
+@@ -699,9 +723,9 @@ test_minimize_refused(void)
+         if (load_and_solve_sense(&p, &res, "min_free_coord", DATS_MIN_FREE_COORD,
+                                  0, path, sizeof path)) {
+             arbsdp_apriori ab;
+-            arb_t lb, ub;
++            arb_t lb, ub, zero;
+             arbsdp_apriori_init(&ab, p.nblocks);
+-            arb_init(lb); arb_init(ub);
++            arb_init(lb); arb_init(ub); arb_init(zero);
+ 
+             int vd = arbsdp_verify_dual_infeasible(&p, &res.it, VERIFY_PREC);
+             arbsdp_certify_status cs =
+@@ -709,8 +733,11 @@ test_minimize_refused(void)
+             printf("  %-24s solve=%s vd=%d certify=%s\n", lbl,
+                    solve_status_name(res.status), vd, certify_status_name(cs));
+             expect_int(vd, 0, lbl, "verify_dual(min)");
+-            expect_int((int) cs, (int) ARBSDP_CERTIFY_INCONCLUSIVE, lbl,
+-                       "certify.status");
++            expect_int(cs == ARBSDP_CERTIFY_OPTIMAL_BRACKET
++                           || cs == ARBSDP_CERTIFY_INCONCLUSIVE, 1, lbl,
++                       "certify not infeas");
++            /* any certified (possibly half-infinite) bracket must contain 0 */
++            expect_int(arb_le(lb, zero) && arb_le(zero, ub), 1, lbl, "lb<=0<=ub");
+ 
+             /* CONTROL: as a MAX the same data IS unbounded (E_22 ray); the
+              * verifier is data-only, so flip the flag on the same iterate. */
+@@ -718,6 +745,44 @@ test_minimize_refused(void)
+             vd = arbsdp_verify_dual_infeasible(&p, &res.it, VERIFY_PREC);
+             expect_int(vd, 1, "min_free_coord(CONTROL)", "verify_dual(max)");
+ 
++            arb_clear(lb); arb_clear(ub); arb_clear(zero);
++            arbsdp_apriori_clear(&ab);
++            arbsdp_result_clear(&res);
++            arbsdp_problem_clear(&p);
++            remove(path);
++        } else {
++            failures++;
++        }
++    }
++
++    /* ---- (D) unbounded min: <C,E_22> < 0 coordinate ray ----------------- */
++    {
++        arbsdp_problem p;
++        arbsdp_result  res;
++        const char *lbl = "min_unbounded_coord";
++
++        if (load_and_solve_sense(&p, &res, "min_unbounded_coord",
++                                 DATS_MIN_UNBOUNDED_COORD, 0, path, sizeof path)) {
++            arbsdp_apriori ab;
++            arb_t lb, ub;
++            arbsdp_apriori_init(&ab, p.nblocks);
++            arb_init(lb); arb_init(ub);
++
++            int vd = arbsdp_verify_dual_infeasible(&p, &res.it, VERIFY_PREC);
++            arbsdp_certify_status cs =
++                arbsdp_certify(lb, ub, &p, &res.it, &ab, VERIFY_PREC);
++            printf("  %-24s solve=%s vd=%d certify=%s\n", lbl,
++                   solve_status_name(res.status), vd, certify_status_name(cs));
++            expect_int(vd, 1, lbl, "verify_dual(min)");
++            expect_int((int) cs, (int) ARBSDP_CERTIFY_DUAL_INFEASIBLE, lbl,
++                       "certify.status");
++
++            /* CONTROL: as a MAX (max -X_22) the problem is BOUNDED (opt 0) and the
++             * same coordinate is NOT an unbounded ray. */
++            p.maximize = 1;
++            vd = arbsdp_verify_dual_infeasible(&p, &res.it, VERIFY_PREC);
++            expect_int(vd, 0, "min_unbounded_coord(CTRL)", "verify_dual(max)");
++
+             arb_clear(lb); arb_clear(ub);
+             arbsdp_apriori_clear(&ab);
+             arbsdp_result_clear(&res);
+@@ -767,7 +832,7 @@ main(void)
+     test_farkas_table();
+     test_feasible_no_misfire();
+     test_feasible_no_misfire_battery();
+-    test_minimize_refused();
++    test_minimize_certified();
+ 
+     /* Free FLINT's thread-local caches (fmpz pool, arf scratch, registered
+      * cleanup hooks) so valgrind reports no possibly-lost / reachable

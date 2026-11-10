@@ -1,7 +1,104 @@
-# HANDOFF — arbsdp (2026-08-19)
+# HANDOFF — arbsdp (2026-11-10)
 
 Five-minute orientation for the next agent. **Read this, then `CLAUDE.md`, then
 `PRD.md` §2, then `docs/MATH_SPEC.md`.**
+
+## SESSION 2026-11-10 — review remediation, waves 1-2 (READ THIS FIRST)
+
+Sixteen review beads closed in one session by parallel subagents in git
+worktrees, integrated serially by cherry-pick onto `ccr-defad313-yhxogk` (NOT yet
+merged to `main`). State at stop: ctest 21/21 normal, 21/21 ASan+UBSan, routine
+valgrind gate 19/19 (`ctest --test-dir c/build -T memcheck -LE slow`);
+`test_golden` 44 PASS, 2 XFAIL (both `sdp_sqrt2_td50` -> bead 6km), 0 FAIL.
+
+### Landed (bead: what, measured)
+
+- **qx4** convergence test, tolerances and the adaptive confirm gate decided on
+  arf MIDPOINTS; tol = 10^-td built in arb; 300-digit clamp removed
+  (trivial_2x2 td=330: |v-1| = 1.2e-332 at 4096 bits; was 1.2e-304). Acceptance
+  item "iterations drop at td 13-15" NOT met and explained: rho_p/rho_d/rho_g
+  shrink together ~1e4/iter, so the residual flags bind at the same iterate;
+  the float64 gap quantization was latent on this corpus. New goldens
+  `max_eig_path_4_td50`, `min_eig_path_4_td120` (130-digit reference, not in
+  verify.wl).
+- **h62 / pw1** the sdp_sqrt2 high-td stall (td=50: 260 it @2048 bits -> 22 it
+  @1024; td=120: LIMIT@499 -> OPTIMAL 51 it @2048). Three causes, separated by
+  on/off measurement: (1) the absolute 1e-14 jitter on S in `nt_gfactor_build`
+  (dominant; REMOVED, audition in MATH_SPEC §3.3.1); (2) the 1e-12 Schur lift
+  (secondary; KEPT, see pp8); (3) NEW: `arb_sqrt/rsqrt/inv` (and `arb_div` with
+  an inexact divisor) truncate the output MIDPOINT to what the input RADIUS
+  justifies -- epic.6 cleared radii on the iterate only. Layer-0 kernels now
+  take midpoints first (linalg.c eigh/psd kernels, schur_solve,
+  factor_with_reg). **Any new Layer-0 kernel must do the same.** Corpus: most
+  td 12/13 goldens 256 -> 128 bits, summed iterations 445 -> 195, ctest wall
+  ~15 s -> ~4 s.
+- **ml6** verified lambda_min: point seed (double Jacobi + Ritz + RQI) then ONE
+  ball Cholesky at an exact shift; back-off 2^4/2^16/2^64; bisection fallback;
+  Gershgorin floor. Lost bits prec/2 -> 15; probes 2005/7238/27863 -> 21 (20
+  matrices at prec 128/512/2048). Bracket widths e.g. max_eig_path_16 2.16e-98
+  -> 9.74e-184. The shift margin is EMPIRICAL for n <= 32 (bead n3l); a short
+  margin costs probes, never soundness. libarbsdp now links libm.
+- **6b6** `arbsdp_pcache`: A_i^b and b materialized once per (solve, prec).
+  Bit-identical (0/161 iterate dumps differ). Parse share 11.9% -> 0.45% on
+  separable_12block; NO suite speed-up -- eigh is 93.5% of instructions on
+  max_eig_path_8 (psd_max_step 73%), so **czx is the performance lever**.
+- **agc** minimize problems are refused by the objective-dependent certifiers
+  (INCONCLUSIVE / 0). The red test exposed two real wrong certificates.
+- **0v1** gfactor Cholesky failure -> cone-exit/NUMERICAL (latent: fires 0
+  times on the corpus). **37w** reader whitelists the decimal grammar
+  (`arb_set_str` also accepted ball syntax and "--1" as +1). **2ny** same
+  validator for `--trace-bound`, plus xbar >= 0. **jhw** load-bearing asserts
+  -> control flow + `test_certify_ndebug`. **7o8** memcheck + ASan ctest gates.
+  **zuf** FormatNum sign fix (NOT EXECUTED -- no Mathematica; audit shows the
+  bug never fired). **axm** cosmetic. **pp8** audition only, stays open.
+
+### Stopped mid-flight -- UNREVIEWED partial work in `wip/` (delete when done)
+
+Uncommitted diffs of three agents, saved as patches. None was reviewed or
+gate-tested; treat as a head start, not as code (rule 8).
+
+| patch | bead | base commit | state when stopped |
+|---|---|---|---|
+| `wip/czx-partial.patch` | czx | 45bdeee | linalg.c/.h + test_linalg.c only (eigh status/counter work); direction.c not started |
+| `wip/ehz-partial.patch` | ehz | 8e992c8 (after 2ny) | provenance parser keys only (golden_provenance.c/.h); test_golden.c not started |
+| `wip/fjw-partial.patch` | fjw | 62d3bfe | certify.c + test_certify_bracket.c + test_farkas.c; agent reported max brackets bit-identical and min goldens certified, but mutation checks, MATH_SPEC derivation and t0u were NOT done. Layer-1 rigor code: re-derive and review before trusting |
+
+### Next, in order
+
+1. **6km (P1, new)** direction numerics near rank-deficient optima: the primal
+   Newton-equation residual |A dX - b dtau + eta r_p| grows ~mu^-3 x roundoff
+   while the Schur solve residual stays at roundoff (sdp_sqrt2 @512 bits:
+   1e-37 at mu 5e-44, 1e-11 at mu 5e-52, STALL). Suspected, not proven: the
+   explicit L^-1 in the G-factor / Rq. Caps `sdp_sqrt2_td50` at 1024 bits (its
+   two known_gaps) and leaves `max_eig_path_4_td50` @512 on a knife edge -- a
+   rounding-level change can flip it to 1024; that is 6km showing, not a
+   regression. Do it TOGETHER with or right after czx (same code).
+2. **czx** (eigh consolidation), then **nux** (Schur refinement), then revisit
+   **pp8** (lift init 0 only wins once 6km + nux exist).
+3. **fjw -> ehz -> t0u** (Layer 1). ehz must mark minimize goldens as
+   known_gaps -> fjw unless fjw lands first.
+4. Small: **qkh** (data radii in Layer 0; probably neutralised by the h62
+   midpoint fix -- verify with a non-exact-decimal problem), **lk3**, **8bt**
+   (soft-optimal path has no test), **alg**, **n3l**, **5ly**.
+5. Efficiency budgets in provenance are now loose (e.g. max_eig_path_16 measures
+   8 bits/digit against a budget of 42): tighten under **b32**.
+
+### Environment notes (fresh container)
+
+- `apt-get install libflint-dev libicu-dev` gives FLINT 3.0.1; `bd` builds with
+  `go install github.com/steveyegge/beads/cmd/bd@latest`, then `bd bootstrap`
+  imports `.beads/issues.jsonl`. The bootstrapped DB uses prefix `arb_prec_IPM`
+  (bd rejects mixed case): new beads were renamed by hand with
+  `bd rename arb_prec_IPM-xxx arb-prec-IPM-xxx`, then `bd export -o
+  .beads/issues.jsonl`.
+- Parallel worktree agents worked; "serial only" below now applies to
+  INTEGRATION (one cherry-pick at a time, full gates between waves).
+- Commit trailers this session omit the model name.
+
+---
+
+*Everything below is the pre-2026-11-10 handoff, kept for history. Where it
+conflicts with the section above, the section above wins.*
 
 ## ACTIVE MANDATE (2026-08-19): remediate the full-source review findings
 

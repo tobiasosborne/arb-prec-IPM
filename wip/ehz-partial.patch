@@ -1,0 +1,145 @@
+diff --git a/c/test/golden_provenance.c b/c/test/golden_provenance.c
+index d87faa3..5a6e35f 100644
+--- a/c/test/golden_provenance.c
++++ b/c/test/golden_provenance.c
+@@ -11,6 +11,7 @@
+ #include <assert.h>
+ #include <sys/stat.h>
+ #include "golden_provenance.h"
++#include "arbsdp/io.h"   /* arbsdp_decimal_is_valid: the strict literal grammar (bead 2ny) */
+ 
+ /* Locate the value position for a top-level key: the char after the ':' that follows
+  * the quoted token "key". Returns NULL if not present. Bounded to [buf, buf+len). */
+@@ -108,6 +109,13 @@ static void parse_gaps(const char *buf, size_t len, golden_case *c) {
+         if (strcmp(kind, "status") == 0) c->gap_status = 1;
+         else if (strcmp(kind, "correctness") == 0) c->gap_correctness = 1;
+         else if (strcmp(kind, "efficiency") == 0) c->gap_efficiency = 1;
++        else if (strcmp(kind, "certificate") == 0) {
++            c->gap_certificate = 1;
++            const char *rp = find_value(obeg, olen, "reason");
++            if (rp) copy_string(rp, oe, c->gap_cert_reason, sizeof c->gap_cert_reason);
++            const char *bp = find_value(obeg, olen, "bead");
++            if (bp) copy_string(bp, oe, c->gap_cert_bead, sizeof c->gap_cert_bead);
++        }
+         if (first) {
+             const char *rp = find_value(obeg, olen, "reason");
+             if (rp) copy_string(rp, oe, c->gap_reason, sizeof c->gap_reason);
+@@ -119,6 +127,32 @@ static void parse_gaps(const char *buf, size_t len, golden_case *c) {
+     }
+ }
+ 
++/* Parse a flat array of quoted strings at key into dst[0..maxn-1] (bounded).
++ * Returns the count (>= 0; 0 if the key is absent), or -1 if malformed (not an
++ * array, an unquoted element, an element too long, or more than maxn). */
++static int parse_string_array(const char *buf, size_t len, const char *key,
++                              char dst[][80], int maxn) {
++    const char *p = find_value(buf, len, key);
++    const char *end = buf + len;
++    int k = 0;
++    if (!p) return 0;
++    if (p >= end || *p != '[') return -1;
++    p++;
++    for (;;) {
++        while (p < end && (isspace((unsigned char)*p) || *p == ',')) p++;
++        if (p >= end) return -1;
++        if (*p == ']') return k;
++        if (*p != '"' || k >= maxn) return -1;
++        const char *q = p + 1;
++        while (q < end && *q != '"') q++;
++        if (q >= end || (size_t)(q - p - 1) >= 80) return -1;
++        memcpy(dst[k], p + 1, (size_t)(q - p - 1));
++        dst[k][q - p - 1] = '\0';
++        k++;
++        p = q + 1;
++    }
++}
++
+ /* Parse one provenance file at path into *c (dats_path is set by caller). Returns
+  * 1 on success, 0 on hard error (already reported to stderr). */
+ static int parse_provenance(const char *path, golden_case *c) {
+@@ -165,7 +199,52 @@ static int parse_provenance(const char *path, golden_case *c) {
+     opt_bool(buf, len, "maximize", &c->maximize); /* absent -> default 1 (unchanged) */
+     opt_string(buf, len, "expected_status", c->expected_status, sizeof c->expected_status);
+     parse_gaps(buf, len, c);
++
++    /* Certificate-gate keys (bead arb-prec-IPM-ehz).  An a-priori trace bound is
++     * what makes a "rigorous" bracket true (CLAUDE.md invariant 5), so an
++     * unjustified or malformed one is a malformed golden: fail loud (rule 5). */
++    c->expected_min_certified_digits = -1;
++    if (opt_number(buf, len, "expected_min_certified_digits", num, sizeof num))
++        c->expected_min_certified_digits = (int)strtol(num, NULL, 10);
++    opt_string(buf, len, "trace_bound_justification", c->trace_bound_justification,
++               sizeof c->trace_bound_justification);
++    opt_string(buf, len, "trace_bound_absent_reason", c->trace_bound_absent_reason,
++               sizeof c->trace_bound_absent_reason);
++    c->n_trace_bounds = parse_string_array(buf, len, "trace_bounds", c->trace_bounds,
++                                           GOLDEN_MAX_BLOCKS);
+     free(buf);
++    if (c->n_trace_bounds < 0) {
++        fprintf(stderr, "FATAL: %s: malformed \"trace_bounds\" (want an array of "
++                "<= %d decimal strings)\n", path, GOLDEN_MAX_BLOCKS);
++        return 0;
++    }
++    for (int b = 0; b < c->n_trace_bounds; b++) {
++        /* strict finite decimal literal (no inf/nan/ball/doubled sign), and >= 0:
++         * tr(X_b) >= 0 on every PSD / diagonal block (bead 2ny). */
++        if (arbsdp_decimal_is_valid(c->trace_bounds[b]) != 0 || c->trace_bounds[b][0] == '-') {
++            fprintf(stderr, "FATAL: %s: trace_bounds[%d]=\"%s\" is not a finite "
++                    "decimal literal >= 0\n", path, b, c->trace_bounds[b]);
++            return 0;
++        }
++    }
++    if (c->n_trace_bounds > 0) {
++        if (c->trace_bound_justification[0] == '\0') {
++            fprintf(stderr, "FATAL: %s: \"trace_bounds\" without a "
++                    "\"trace_bound_justification\" (an unjustified xbar is how a "
++                    "rigorous bracket becomes false)\n", path);
++            return 0;
++        }
++        if (c->expected_min_certified_digits < 0) {
++            fprintf(stderr, "FATAL: %s: \"trace_bounds\" without "
++                    "\"expected_min_certified_digits\"\n", path);
++            return 0;
++        }
++    } else if (strcmp(c->expected_status, "optimal") == 0 &&
++               c->trace_bound_absent_reason[0] == '\0') {
++        fprintf(stderr, "FATAL: %s: optimal golden with neither \"trace_bounds\" "
++                "nor \"trace_bound_absent_reason\"\n", path);
++        return 0;
++    }
+     return 1;
+ }
+ 
+diff --git a/c/test/golden_provenance.h b/c/test/golden_provenance.h
+index fc51f74..7366f9c 100644
+--- a/c/test/golden_provenance.h
++++ b/c/test/golden_provenance.h
+@@ -1,5 +1,7 @@
+ #ifndef ARBSDP_GOLDEN_PROVENANCE_H
+ #define ARBSDP_GOLDEN_PROVENANCE_H
++/* Max blocks a golden may carry trace bounds for (separable_12block has 12). */
++#define GOLDEN_MAX_BLOCKS 32
+ typedef struct {
+     char   name[128];
+     char   dats_path[512];               /* "<golden_dir>/<name>/<name>.dat-s" */
+@@ -19,6 +21,20 @@ typedef struct {
+     int    gap_efficiency;               /* 1 if kind "efficiency" */
+     char   gap_reason[256];              /* first known_gaps entry's reason ("" if none) */
+     char   gap_bead[64];                 /* first known_gaps entry's bead ("" if none) */
++    /* --- certificate gate (bead arb-prec-IPM-ehz) --------------------------------
++     * trace_bounds[b]: decimal-string a-priori bound xbar_b >= tr(X_b) for block b
++     * (0-indexed), valid on the WHOLE feasible set; n_trace_bounds = 0 if absent.
++     * Present => trace_bound_justification (WHY it holds) and
++     * expected_min_certified_digits are REQUIRED (fail loud).  For an "optimal"
++     * golden with NO bound, trace_bound_absent_reason is REQUIRED instead. */
++    int    n_trace_bounds;
++    char   trace_bounds[GOLDEN_MAX_BLOCKS][80];
++    char   trace_bound_justification[512];
++    char   trace_bound_absent_reason[512];
++    int    expected_min_certified_digits; /* -1 if absent */
++    int    gap_certificate;              /* 1 if a known_gaps entry has kind "certificate" */
++    char   gap_cert_reason[256];         /* that entry's reason ("" if none) */
++    char   gap_cert_bead[64];            /* that entry's bead ("" if none) */
+ } golden_case;
+ /* Discover golden cases under golden_dir: each subdirectory that contains both
+  * provenance.json and <subdir>/<subdir>.dat-s yields one parsed case. Fills
