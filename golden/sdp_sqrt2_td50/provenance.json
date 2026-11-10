@@ -21,12 +21,12 @@
   "known_gaps": [
     {
       "kind": "correctness",
-      "bead": "arb-prec-IPM-h62",
+      "bead": "arb-prec-IPM-6km",
       "reason": "Measured 2026-11-10 after h62 (point-mode midpoints) and pw1 (no S jitter): the first OPTIMAL candidate appears at prec 1024 (22 iterations, 64.2 matched digits); its confirming solve needs 2048 > prec_cap 1024, so the adaptive status is LIMIT. The 512-bit solve reaches mu = 5e-48 in 17 iterations, then the residual of the primal Newton equation jumps from ~1e-37 to 1e-11 within two iterations (error growth ~mu^-3 against unit roundoff 1e-154) and it STALLs: an open direction-numerics defect. Before the fixes: candidate at 2048 after 260 iterations."
     },
     {
       "kind": "efficiency",
-      "bead": "arb-prec-IPM-h62",
+      "bead": "arb-prec-IPM-6km",
       "reason": "Measured 2026-11-10 after h62 and pw1: 22 iterations (meets the 22 budget) at final_prec 1024 = 16 bits per matched digit against the 11 budget, which a 512-bit solve would meet; same open direction-numerics defect as the correctness gap. Before the fixes: 260 iterations at 2048 (34 bits per digit)."
     }
   ]
