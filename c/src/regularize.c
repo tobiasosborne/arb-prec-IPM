@@ -272,8 +272,16 @@ arbsdp_factor_with_reg_pc(arb_mat_t L, const arb_mat_t M, arbsdp_regstate *rs,
         arb_add(lift, rs->delta_p, rs->delta_d, prec);
         arb_add(lift, lift, rs->delta_g, prec);
 
-        /* Mreg = M + lift*I.  M is never mutated (invariant 4 auditability). */
-        arb_mat_set(Mreg, M);
+        /* Mreg = mid(M) + lift*I.  M is never mutated (invariant 4
+         * auditability).  POINT MODE (CLAUDE.md rule 1; bead arb-prec-IPM-h62):
+         * factor the MIDPOINT matrix.  M is assembled in ball arithmetic and
+         * its radii overestimate its point error by many orders; arb_mat_cho's
+         * arb_sqrt pivots would otherwise be computed only to the accuracy
+         * those radii justify (FLINT 3.0.1: radius 2^-100 at prec 512 gives a
+         * 128-bit midpoint), capping the Newton direction's accuracy far
+         * below `prec`.  A successful cho of mid(M)+lift*I is the point-mode
+         * "PD at this precision" signal Layer 0 needs; rigor is Layer 1's. */
+        arb_mat_get_mid(Mreg, M);
         for (slong i = 0; i < m; i++)
             arb_add(arb_mat_entry(Mreg, i, i), arb_mat_entry(Mreg, i, i), lift, prec);
 

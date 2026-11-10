@@ -72,11 +72,20 @@ arbsdp_eigh(arb_ptr eigvals, arb_mat_t Q, const arb_mat_t A, slong prec)
 
         for (slong p = 0; p < n - 1; p++) {
             for (slong q = p + 1; q < n; q++) {
-                arb_set(apq, arb_mat_entry(M, p, q));
+                /* POINT MODE (CLAUDE.md rule 1; bead arb-prec-IPM-h62): the
+                 * rotation is computed from MIDPOINTS.  arb_div / arb_sqrt /
+                 * arb_inv / arb_rsqrt below compute their output midpoint only
+                 * to the relative accuracy the input radius justifies (FLINT
+                 * 3.0.1, measured: radius 2^-100 at prec 512 -> 128-bit
+                 * midpoint).  The radii accumulated over the sweeps are
+                 * untrusted ball overestimates; carrying them into the angle
+                 * computation truncated the rotation (hence Q, W, the Schur
+                 * matrix) to ~100 bits regardless of `prec`. */
+                arb_get_mid_arb(apq, arb_mat_entry(M, p, q));
                 if (arf_is_zero(arb_midref(apq)))
                     continue;
-                arb_set(app, arb_mat_entry(M, p, p));
-                arb_set(aqq, arb_mat_entry(M, q, q));
+                arb_get_mid_arb(app, arb_mat_entry(M, p, p));
+                arb_get_mid_arb(aqq, arb_mat_entry(M, q, q));
 
                 /* theta = (aqq - app) / (2 apq) */
                 arb_sub(theta, aqq, app, prec);
@@ -255,7 +264,9 @@ psd_pow_half(arb_mat_t out, const arb_mat_t A, int invert, slong prec)
      * returned status is the contract callers must honor (rule 5). */
     arb_mat_set(QD, Q);
     for (slong i = 0; i < n; i++) {
-        arb_set(d, lam + i);
+        /* POINT MODE (bead h62): sqrt/rsqrt of the eigenvalue MIDPOINT, so the
+         * accumulated rotation radius cannot shorten the result's midpoint. */
+        arb_get_mid_arb(d, lam + i);
         if (arf_cmp(arb_midref(d), arb_midref(floor_lam)) < 0)
             arb_set(d, floor_lam);
         if (arf_sgn(arb_midref(d)) <= 0)

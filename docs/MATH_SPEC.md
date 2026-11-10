@@ -607,6 +607,44 @@ arithmetic content of the midpoints or the correctness of Layer-1 certification.
 table in PRD.md §2 lists "none" under Rigor for Layer 0). All rigor comes from
 Layer 1, which operates in ball arithmetic on the Layer-0 midpoint output.
 
+#### 3.10.1 Midpoint inputs to radius-sensitive kernels (bead arb-prec-IPM-h62)
+
+Zeroing the ITERATE's radii (§3.10) is not enough: Arb's `arb_sqrt`,
+`arb_rsqrt`, `arb_inv` and `arb_div` compute their output **midpoint** only to
+the relative accuracy that the **input radius** justifies (about
+`rel_accuracy_bits(input) + 30` bits). Measured on FLINT 3.0.1 at prec 512 with
+an input radius of 2^-100: `arb_sqrt`/`arb_rsqrt` return a 128-bit midpoint,
+`arb_inv` a 131-bit midpoint (error ~1e-40 against the radius-free result);
+`arb_mul`/`arb_add` keep the full 512 bits. Intermediate quantities in Layer 0
+(the Jacobi rotation entries, the eigenvalues fed to `sqrt`/`rsqrt`, the
+assembled Schur matrix M, the Schur RHS) carry radii from long ball-arithmetic
+chains that overestimate their true point error by tens of orders of magnitude,
+so these kernels silently computed the NT scaling, the Cholesky factor of M and
+the Newton direction to ~100-150 bits whatever `prec` was. The controller then
+had to escalate `prec` to buy back bits the arithmetic was throwing away.
+
+Rule (point mode, CLAUDE.md rule 1): every Layer-0 call into one of these
+kernels takes **midpoints** as input:
+
+| Site | Input taken as midpoint |
+|------|-------------------------|
+| `arbsdp_eigh` (linalg.c) | `a_pq, a_pp, a_qq` before the rotation angle (`div`, `sqrt`, `inv`, `rsqrt`) |
+| `psd_pow_half` (linalg.c) | each eigenvalue before `sqrt` / `rsqrt` |
+| `arbsdp_factor_with_reg` (regularize.c) | `M` (factor `mid(M) + lift*I`) |
+| `arbsdp_schur_solve` (schur.c) | `L` and `rhs` (triangular solves use `arb_div`) |
+
+Measured on the golden corpus (26 problems, `test_golden`, same Layer-0
+constants): sum over goldens of log2(final_prec) 207 -> 194 (13 halvings);
+NUMERICAL escalation exits 25 -> 11 per corpus run (70 -> 57 solves);
+max_eig_path_16 512 -> 128 bits, max_eig_path_4/8, max_eig_tridiag_3x3,
+max_eigenvalue_2x2, sdp_sqrt2, separable_12block, mixed_blocks 256 -> 128,
+disparate_scale_sqrt2 and two_block_corr_coupled 512 -> 256,
+min_eig_path_4_td120 2048 -> 1024, sdp_sqrt2_td50 2048 -> 1024. Iteration
+counts are unchanged (445 summed) except where a lower precision now
+converges. Unit tests: `test_linalg`, `test_schur`, `test_regularize` each feed
+the same data with and without a 2^-60 radius at prec 512 and require the
+outputs' midpoints to agree to 1e-140 (they agreed to only ~1e-25 before).
+
 ### 3.11 Best-iterate tracking
 
 Source: HsdeNtSdpSolver.ts:436-484.

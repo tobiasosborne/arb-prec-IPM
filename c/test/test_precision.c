@@ -371,26 +371,29 @@ test_mutation_guards(void)
     }
 
     /* (m2) a cap below the achievable accuracy yields LIMIT + digits < target,
-     * so a false-OPTIMAL-at-cap mutation is detectable.  prec_max=512 on
-     * sdp_sqrt2 with a 30-digit target: ~7.6 digits achievable, NOT optimal. */
+     * so a false-OPTIMAL-at-cap mutation is detectable.  prec_max=256 on
+     * sdp_sqrt2 with a 30-digit target: 23.0 digits achievable, NOT optimal.
+     * (Bead h62 moved the cap from 512: once Layer 0 stopped truncating
+     * midpoints, the 512-bit solve reached > 30 digits, so 512 was no longer a
+     * cap BELOW the achievable accuracy -- the premise this guard needs.) */
     {
         arbsdp_problem p;
         arbsdp_adaptive_result r;
         arbsdp_precision_params pp;
         if (load_golden(&p, "sdp_sqrt2")) {
             arbsdp_precision_default_params(&pp);
-            pp.prec0 = 128; pp.prec_max = 512; pp.target_digits = 30;
+            pp.prec0 = 128; pp.prec_max = 256; pp.target_digits = 30;
             arbsdp_solve_adaptive(&r, &p, &pp);
             double d = digits_matched(r.res.value, GOLD_SQRT2);
-            printf("  MUTATION m2: prec_max=512, target=30 on sdp_sqrt2 -> status=%s,"
+            printf("  MUTATION m2: prec_max=256, target=30 on sdp_sqrt2 -> status=%s,"
                    " %.1f digits (cap below achievable).\n",
                    adaptive_status_name(r.status), d);
             CHECK(r.status == ARBSDP_ADAPTIVE_LIMIT,
                   "mutation m2: capped-below-target must be LIMIT, not OPTIMAL");
             CHECK(d < 30.0,
                   "mutation m2: achieved digits must be < target at the cap");
-            CHECK(r.final_prec == 512,
-                  "mutation m2: must have escalated up to the cap (512)");
+            CHECK(r.final_prec == 256,
+                  "mutation m2: must have escalated up to the cap (256)");
             arbsdp_adaptive_result_clear(&r);
             arbsdp_problem_clear(&p);
         }

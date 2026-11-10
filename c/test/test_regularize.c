@@ -479,9 +479,75 @@ test_mutation(void)
     arbsdp_problem_clear(&p);
 }
 
+/* ----- Test 6: POINT MODE -- the factor ignores M's radii (h62) ------------
+ * arb_mat_cho takes square roots of the pivots with arb_sqrt, whose MIDPOINT is
+ * only computed to the accuracy the input radius justifies.  The Schur M is
+ * assembled in ball arithmetic and arrives with radii far larger than its true
+ * point error; Layer 0 never trusts radii (CLAUDE.md rule 1), so they must not
+ * shorten the factor.  Same M with and without a 2^-60 radius per entry, at
+ * prec 512: the factor midpoints must agree to 1e-140 (not ~1e-25). */
+static void
+test_factor_point_mode(void)
+{
+    const slong P = 512;
+    arbsdp_problem p;
+    arbsdp_regstate rs, rsb;
+    arb_mat_t M, Mb, L, Lb;
+    arb_t d, t;
+    int ok, okb, worst_ok = 1;
+
+    build_healthy_problem(&p);
+    arbsdp_regstate_init(&rs, P);
+    arbsdp_regstate_init(&rsb, P);
+    arb_mat_init(M, 3, 3);
+    arb_mat_init(Mb, 3, 3);
+    arb_mat_init(L, 3, 3);
+    arb_mat_init(Lb, 3, 3);
+    arb_init(d);
+    arb_init(t);
+
+    arb_set_si(arb_mat_entry(M, 0, 0), 7);
+    arb_set_si(arb_mat_entry(M, 1, 1), 5);
+    arb_set_si(arb_mat_entry(M, 2, 2), 3);
+    arb_set_si(arb_mat_entry(M, 0, 1), 2); arb_set_si(arb_mat_entry(M, 1, 0), 2);
+    arb_set_si(arb_mat_entry(M, 0, 2), 1); arb_set_si(arb_mat_entry(M, 2, 0), 1);
+    arb_set_si(arb_mat_entry(M, 1, 2), -1); arb_set_si(arb_mat_entry(M, 2, 1), -1);
+    arb_mat_set(Mb, M);
+    for (slong i = 0; i < 3; i++)
+        for (slong j = 0; j < 3; j++)
+            mag_set_ui_2exp_si(arb_radref(arb_mat_entry(Mb, i, j)), 1, -60);
+
+    ok = arbsdp_factor_with_reg(L, M, &rs, &p, P, NULL);
+    okb = arbsdp_factor_with_reg(Lb, Mb, &rsb, &p, P, NULL);
+    CHECK(ok == 1 && okb == 1, "factor_point_mode: PD M must factor");
+
+    arb_set_d(t, 1e-140);
+    for (slong i = 0; i < 3; i++)
+        for (slong j = 0; j < 3; j++) {
+            arb_get_mid_arb(d, arb_mat_entry(L, i, j));
+            arb_sub(d, d, arb_mat_entry(Lb, i, j), P);
+            arb_get_mid_arb(d, d);
+            arb_abs(d, d);
+            if (!arb_le(d, t))
+                worst_ok = 0;
+        }
+    CHECK(worst_ok, "factor_point_mode: factor midpoints depend on M's radius");
+
+    arb_clear(d);
+    arb_clear(t);
+    arb_mat_clear(M);
+    arb_mat_clear(Mb);
+    arb_mat_clear(L);
+    arb_mat_clear(Lb);
+    arbsdp_regstate_clear(&rs);
+    arbsdp_regstate_clear(&rsb);
+    arbsdp_problem_clear(&p);
+}
+
 int
 main(void)
 {
+    test_factor_point_mode();
     test_noop_on_pd();
     test_rescue();
     test_escalation();

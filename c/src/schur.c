@@ -190,6 +190,20 @@ arbsdp_schur_solve(arb_mat_t x, const arb_mat_t L, const arb_mat_t rhs,
     assert(arb_mat_nrows(x) == arb_mat_nrows(rhs));
     assert(arb_mat_ncols(x) == arb_mat_ncols(rhs));
 
-    /* factor-once / solve-many: reuse L for each RHS (predictor + corrector). */
-    arb_mat_solve_cho_precomp(x, L, rhs, prec);
+    /* factor-once / solve-many: reuse L for each RHS (predictor + corrector).
+     * POINT MODE (CLAUDE.md rule 1; bead arb-prec-IPM-h62): solve on the
+     * MIDPOINTS of L and rhs.  The triangular solves divide with arb_div, whose
+     * output midpoint is only computed to the accuracy the input radius
+     * justifies; the RHS arrives through long ball-arithmetic chains with
+     * radii far above its point error, which truncated the direction dy. */
+    {
+        arb_mat_t Lm, rm;
+        arb_mat_init(Lm, arb_mat_nrows(L), arb_mat_ncols(L));
+        arb_mat_init(rm, arb_mat_nrows(rhs), arb_mat_ncols(rhs));
+        arb_mat_get_mid(Lm, L);
+        arb_mat_get_mid(rm, rhs);
+        arb_mat_solve_cho_precomp(x, Lm, rm, prec);
+        arb_mat_clear(Lm);
+        arb_mat_clear(rm);
+    }
 }

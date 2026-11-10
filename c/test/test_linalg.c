@@ -459,9 +459,127 @@ test_mutation_sanity(void)
     arb_mat_clear(Q);
 }
 
+/* ----- Test 7: POINT MODE -- midpoints independent of input radii (h62) -----
+ * Arb's arb_sqrt / arb_rsqrt / arb_inv / arb_div compute the output MIDPOINT
+ * only to the relative accuracy the input radius justifies (FLINT 3.0.1,
+ * measured: input radius 2^-100 at prec 512 gives a 128-bit midpoint).  Layer 0
+ * never trusts radii (CLAUDE.md rule 1), so a radius carried in from upstream
+ * arithmetic must not shorten the point result.  Feed the same matrix with and
+ * without a 2^-60 radius on every entry at prec 512; eigenvalue and psd_sqrt
+ * midpoints must agree to ~2^-480 (relative), not to the radius-limited ~2^-90. */
+static void
+point_mid_dist(arb_t out, const arb_t a, const arb_t b, slong prec)
+{
+    arb_t x, y;
+    arb_init(x);
+    arb_init(y);
+    arb_get_mid_arb(x, a);
+    arb_get_mid_arb(y, b);
+    arb_sub(out, x, y, prec);
+    arb_abs(out, out);
+    arb_clear(x);
+    arb_clear(y);
+}
+
+static void
+test_point_mode_radius_independent(void)
+{
+    const slong n = 3, P = 512;
+    arb_mat_t A, Ab, Q, Qb, R, Rb;
+    arb_ptr lam, lamb;
+    arb_t d, worst, tol;
+
+    arb_mat_init(A, n, n);
+    arb_mat_init(Ab, n, n);
+    arb_mat_init(Q, n, n);
+    arb_mat_init(Qb, n, n);
+    arb_mat_init(R, n, n);
+    arb_mat_init(Rb, n, n);
+    lam = _arb_vec_init(n);
+    lamb = _arb_vec_init(n);
+    arb_init(d);
+    arb_init(worst);
+    arb_init(tol);
+
+    /* A = [[4,1,1/3],[1,3,1/7],[1/3,1/7,2]] (inexact thirds/sevenths at P). */
+    arb_set_si(arb_mat_entry(A, 0, 0), 4);
+    arb_set_si(arb_mat_entry(A, 1, 1), 3);
+    arb_set_si(arb_mat_entry(A, 2, 2), 2);
+    set_sym(A, 0, 1, 1);
+    arb_set_si(d, 1); arb_div_si(d, d, 3, P);
+    mag_zero(arb_radref(d));
+    arb_set(arb_mat_entry(A, 0, 2), d); arb_set(arb_mat_entry(A, 2, 0), d);
+    arb_set_si(d, 1); arb_div_si(d, d, 7, P);
+    mag_zero(arb_radref(d));
+    arb_set(arb_mat_entry(A, 1, 2), d); arb_set(arb_mat_entry(A, 2, 1), d);
+
+    arb_mat_set(Ab, A);
+    for (slong i = 0; i < n; i++)
+        for (slong j = 0; j < n; j++)
+            mag_set_ui_2exp_si(arb_radref(arb_mat_entry(Ab, i, j)), 1, -60);
+
+    arb_one(tol);
+    arb_mul_2exp_si(tol, tol, -480);   /* entries/eigenvalues are O(1..5) */
+
+    arbsdp_eigh(lam, Q, A, P);
+    arbsdp_eigh(lamb, Qb, Ab, P);
+    arb_zero(worst);
+    for (slong i = 0; i < n; i++) {
+        point_mid_dist(d, lam + i, lamb + i, P);
+        arb_max(worst, worst, d, P);
+    }
+    CHECK(arf_cmp(arb_midref(worst), arb_midref(tol)) <= 0,
+          "point mode: eigh eigenvalue midpoints depend on the input radius");
+
+    CHECK(arbsdp_psd_sqrt(R, A, P) == 0, "point mode: psd_sqrt(A) gate");
+    CHECK(arbsdp_psd_sqrt(Rb, Ab, P) == 0, "point mode: psd_sqrt(A+rad) gate");
+    arb_zero(worst);
+    for (slong i = 0; i < n; i++)
+        for (slong j = 0; j < n; j++) {
+            point_mid_dist(d, arb_mat_entry(R, i, j), arb_mat_entry(Rb, i, j), P);
+            arb_max(worst, worst, d, P);
+        }
+    CHECK(arf_cmp(arb_midref(worst), arb_midref(tol)) <= 0,
+          "point mode: psd_sqrt midpoints depend on the input radius");
+
+    /* Already-diagonal input: Jacobi performs no rotation, so the eigenvalues
+     * keep the input radius and only psd_pow_half's own midpoint step protects
+     * the sqrt (a rotated input re-forms its diagonal from midpoints in eigh,
+     * which would hide a regression there). */
+    arb_mat_zero(A);
+    arb_set_si(arb_mat_entry(A, 0, 0), 2);
+    arb_set_si(arb_mat_entry(A, 1, 1), 3);
+    arb_set_si(arb_mat_entry(A, 2, 2), 5);
+    arb_mat_set(Ab, A);
+    for (slong i = 0; i < n; i++)
+        mag_set_ui_2exp_si(arb_radref(arb_mat_entry(Ab, i, i)), 1, -60);
+    CHECK(arbsdp_psd_invsqrt(R, A, P) == 0, "point mode: psd_invsqrt(D) gate");
+    CHECK(arbsdp_psd_invsqrt(Rb, Ab, P) == 0, "point mode: psd_invsqrt(D+rad) gate");
+    arb_zero(worst);
+    for (slong i = 0; i < n; i++) {
+        point_mid_dist(d, arb_mat_entry(R, i, i), arb_mat_entry(Rb, i, i), P);
+        arb_max(worst, worst, d, P);
+    }
+    CHECK(arf_cmp(arb_midref(worst), arb_midref(tol)) <= 0,
+          "point mode: psd_invsqrt of a diagonal input depends on its radius");
+
+    _arb_vec_clear(lam, n);
+    _arb_vec_clear(lamb, n);
+    arb_clear(d);
+    arb_clear(worst);
+    arb_clear(tol);
+    arb_mat_clear(A);
+    arb_mat_clear(Ab);
+    arb_mat_clear(Q);
+    arb_mat_clear(Qb);
+    arb_mat_clear(R);
+    arb_mat_clear(Rb);
+}
+
 int
 main(void)
 {
+    test_point_mode_radius_independent();
     test_eigh_diag();
     test_eigh_known();
     test_psd_sqrt();

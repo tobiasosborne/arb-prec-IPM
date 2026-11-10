@@ -456,9 +456,60 @@ test_mutation(void)
     arbsdp_problem_clear(&p);
 }
 
+/* ----- Test 6: POINT MODE -- solve midpoints independent of radii (h62) ----
+ * arb_mat_solve_cho_precomp divides by the pivots with arb_div, whose output
+ * MIDPOINT is only computed to the accuracy the input radius justifies.  Layer
+ * 0 never trusts radii (CLAUDE.md rule 1): the RHS arrives carrying radii
+ * inflated by long ball-arithmetic chains, and those must not shorten the
+ * point solution.  Same L, rhs with and without a 2^-60 radius per entry, at
+ * prec 512: the solution midpoints must agree to 1e-140 (not ~1e-25).
+ * Probe (FLINT 3.0.1): arb_div truncates the quotient midpoint only when the
+ * DIVISOR is inexact, to the quotient ball's accuracy -- so taking either L's
+ * or the rhs's midpoint alone already passes this test; removing both fails
+ * it (verified).  The solve keeps both (L carries cho rounding radii). */
+static void
+test_solve_point_mode(void)
+{
+    const slong m = 3, P = 512;
+    arb_mat_t M, L, rhs, rhsb, x, xb;
+
+    arb_mat_init(M, m, m);
+    arb_mat_init(L, m, m);
+    arb_mat_init(rhs, m, 1);
+    arb_mat_init(rhsb, m, 1);
+    arb_mat_init(x, m, 1);
+    arb_mat_init(xb, m, 1);
+
+    arb_set_si(arb_mat_entry(M, 0, 0), 7);
+    arb_set_si(arb_mat_entry(M, 1, 1), 5);
+    arb_set_si(arb_mat_entry(M, 2, 2), 3);
+    set_sym(M, 0, 1, 2); set_sym(M, 0, 2, 1); set_sym(M, 1, 2, -1);
+    CHECK(arbsdp_schur_factor(L, M, P) == 1, "solve_point_mode: M not proven PD");
+
+    arb_set_si(arb_mat_entry(rhs, 0, 0), 1);
+    arb_set_si(arb_mat_entry(rhs, 1, 0), -2);
+    arb_set_si(arb_mat_entry(rhs, 2, 0), 3);
+    arb_mat_set(rhsb, rhs);
+    for (slong i = 0; i < m; i++)
+        mag_set_ui_2exp_si(arb_radref(arb_mat_entry(rhsb, i, 0)), 1, -60);
+
+    arbsdp_schur_solve(x, L, rhs, P);
+    arbsdp_schur_solve(xb, L, rhsb, P);
+    CHECK(mat_close(x, xb, 1e-140),
+          "solve_point_mode: solution midpoints depend on the rhs radius");
+
+    arb_mat_clear(M);
+    arb_mat_clear(L);
+    arb_mat_clear(rhs);
+    arb_mat_clear(rhsb);
+    arb_mat_clear(x);
+    arb_mat_clear(xb);
+}
+
 int
 main(void)
 {
+    test_solve_point_mode();
     test_symmetric();
     test_pd_factor();
     test_solve_reuse();
