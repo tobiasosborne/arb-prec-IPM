@@ -135,6 +135,7 @@ static const char *adaptive_status_name(arbsdp_adaptive_status s) {
     switch (s) {
     case ARBSDP_ADAPTIVE_OPTIMAL: return "OPTIMAL";
     case ARBSDP_ADAPTIVE_LIMIT:   return "LIMIT";
+    case ARBSDP_ADAPTIVE_INFEASIBLE: return "INFEASIBLE";
     default:                      return "?";
     }
 }
