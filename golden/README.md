@@ -111,6 +111,8 @@ All numeric values in the generated files are written as 65-digit plain decimals
 | diag_weight_kappa12 | 4x4 PSD | 1 | 1.0 | integer | data cond(C)=1e12; BOUNDARY: X*=e1e1^T; prec_cap 256 |
 | two_block_corr_coupled | 2x2+2x2 PSD | 5 | 2*sqrt(2) = 2.8284... | irrational | 2 coupled PSD blocks; both rank-1 boundary; prec_cap 2048 |
 | separable_12block | 12x(2x2 PSD) | 12 | 80.5708... (sum of 12 surds) | irrational | 12 PSD blocks; m=12 Schur assembly; prec_cap 512 |
+| max_eig_path_4_td50 | 4x4 PSD | 1 | (5+sqrt(5))/2 = 3.6180... | irrational | max_eig_path_4 data at target_digits=50 (bead qx4); 65-digit ref; prec_cap 1024 |
+| min_eig_path_4_td120 | 4x4 PSD | 1 | (3-sqrt(5))/2 = 0.3819... | irrational | min_eig_path_4 data (minimize) at target_digits=120 (bead qx4); 130-digit ref (python isqrt + arb); prec_cap 4096 |
 
 ### Detailed descriptions
 

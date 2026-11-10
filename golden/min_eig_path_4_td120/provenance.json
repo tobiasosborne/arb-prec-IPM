@@ -1,0 +1,20 @@
+{
+  "name": "min_eig_path_4_td120",
+  "source": "python-isqrt+arb",
+  "description": "Same problem as golden/min_eig_path_4 (data file identical apart from the header comment): 4x4 SDP min <C,X> s.t. tr(X)=1, X 4x4 PSD, C = tridiagonal Toeplitz T_4(2,1). opt = lambda_min(C) = 2 - 2 cos(pi/5) = (3 - sqrt(5))/2. Rank-1 boundary optimum; minimize (maximize=0) path. Run at target_digits=120, beyond the ~16-digit float64 range of the former convergence test (bead arb-prec-IPM-qx4); needs a reference with >= 125 digits, hence the new 130-digit value.",
+  "m": 1,
+  "nblocks": 1,
+  "block_sizes": [4],
+  "maximize": false,
+  "optimal_value": "0.3819660112501051517954131656343618822796908201942371378645513772947395371810975502927927958106088625152459119246131082478733661378",
+  "optimal_value_digits": 130,
+  "reference_method": "Closed form (3 - sqrt(5))/2, rounded half-even to 130 significant digits. Computed two independent ways that agree to 139 digits: (1) Python 3 exact integer arithmetic, (3*10^145 - isqrt(5*10^290))/(2*10^145), residual x^2 - 3x + 1 = -2.4e-146; (2) FLINT 3.0.1 arb at 1000 bits, both (3 - arb_sqrt_ui(5))/2 and 2 - 2 cos(pi/5) (arb_const_pi, arb_cos), enclosure radius 3.2e-141. The first 65 digits equal golden/min_eig_path_4's Wolfram/mpmath value verbatim.",
+  "generated_by": "arbsdp bead arb-prec-IPM-qx4",
+  "expected_status": "optimal",
+  "target_digits": 120,
+  "prec_cap": 4096,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 22,
+  "expected_max_iters": 46,
+  "known_gaps": []
+}

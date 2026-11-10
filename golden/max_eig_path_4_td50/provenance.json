@@ -1,0 +1,20 @@
+{
+  "name": "max_eig_path_4_td50",
+  "source": "wolframscript",
+  "description": "Same problem as golden/max_eig_path_4 (data file identical apart from the header comment): 4x4 SDP max <C,X> s.t. tr(X)=1, X 4x4 PSD, C = tridiagonal Toeplitz T_4(2,1). opt = lambda_max(C) = 2 + 2 cos(pi/5) = (5 + sqrt(5))/2. Rank-1 boundary optimum. Run at target_digits=50, beyond the ~16-digit float64 range of the former convergence test (bead arb-prec-IPM-qx4).",
+  "m": 1,
+  "nblocks": 1,
+  "block_sizes": [4],
+  "maximize": true,
+  "optimal_value": "3.6180339887498948482045868343656381177203091798057628621354486227",
+  "optimal_value_digits": 65,
+  "reference_method": "Reused verbatim from golden/max_eig_path_4/provenance.json (closed form 2 + 2 cos(pi/5); Wolfram + mpmath/sympy cross-check, 65 digits). The 65-digit reference resolves the 50-digit target with 15 digits to spare.",
+  "generated_by": "arbsdp bead arb-prec-IPM-qx4 (copy of epic.3 golden max_eig_path_4)",
+  "expected_status": "optimal",
+  "target_digits": 50,
+  "prec_cap": 1024,
+  "correctness_tol_digits": 0,
+  "expected_max_bits_per_digit": 13,
+  "expected_max_iters": 22,
+  "known_gaps": []
+}

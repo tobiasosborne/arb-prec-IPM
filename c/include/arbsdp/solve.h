@@ -99,17 +99,25 @@ typedef enum {
  * (convergence.h) for the TS defaults.  feas_tol/opt_tol are the 6-flag scaling
  * tolerances; iter_limit caps iterations; stall_cap caps consecutive non-decreasing
  * mu iterations before an honest ARBSDP_SOLVE_STALL exit.
+ *
+ * tol_digits (bead arb-prec-IPM-qx4): when > 0 it OVERRIDES feas_tol/opt_tol
+ * with feas_tol = opt_tol = 10^-tol_digits built in arb at the working precision
+ * -- no double round trip, no ceiling (a double cannot hold 10^-400).  The
+ * adaptive controller sets it to target_digits.  0 (the default) uses the double
+ * fields, each converted EXACTLY to arb.  The convergence test always runs in
+ * arb midpoint arithmetic (convergence.h).
  */
 typedef struct {
     double feas_tol;     /* primal+dual feasibility tolerance (Defaults: 1e-8)   */
     double opt_tol;      /* optimality-gap tolerance         (Defaults: 1e-8)    */
     int    iter_limit;   /* hard iteration cap               (Defaults: 500)     */
     int    stall_cap;    /* consecutive-stall cap            (Defaults: 10)      */
+    int    tol_digits;   /* >0: feas=opt=10^-tol_digits in arb (Defaults: 0)     */
 } arbsdp_solve_params;
 
 /*
  * arbsdp_solve_default_params -- fill `out` with the TS Defaults.ts values
- * (feas_tol=1e-8, opt_tol=1e-8, iter_limit=500, stall_cap=10).
+ * (feas_tol=1e-8, opt_tol=1e-8, iter_limit=500, stall_cap=10) and tol_digits=0.
  */
 void arbsdp_solve_default_params(arbsdp_solve_params *out);
 

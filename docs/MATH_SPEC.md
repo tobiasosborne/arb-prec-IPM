@@ -393,7 +393,49 @@ the combined step (safeguard applied, line 827).
 
 ### 3.8 Convergence test (6-flag HSDE)
 
-Source: HsdeNtSdpSolver.ts:1043-1132 (`checkHsdeTermination`).
+Source: HsdeNtSdpSolver.ts:1043-1132 (`checkHsdeTermination`); best-iterate
+metric HsdeNtSdpSolver.ts:431-436; soft-optimal HsdeNtSdpSolver.ts:474-483.
+Implemented in `c/src/convergence.c` (`arbsdp_check_convergence_arb`).
+
+**Arithmetic: arb midpoints at the working precision (bead arb-prec-IPM-qx4).**
+The TS reference evaluates every formula below in float64.  A literal port is
+wrong for this library: gapAbs = |pObjPure - dObjPure| is then a difference of
+two doubles, quantized at 1 ulp of the objective (2^-54 = 5.55e-17 for an
+objective of 0.4).  With optTol < ~1e-16 the gap flag fires only when the two
+doubles collide (a true gap of 1e-20 reads as 0) and misses true gaps that
+straddle a rounding boundary (a true gap of 2e-35 reads as 5.55e-17); the stop
+decision above ~16 digits is rounding noise.  Therefore:
+
+- Every quantity in this section (norms, rho_p, rho_d, rho_g, gapAbs, gapScale,
+  prstatus, the `achieved` metric, the §3.8.1 thresholds) is formed in `arf`
+  (the arb midpoint type) from the iterate's MIDPOINTS, at the working
+  precision, round-to-nearest.
+- Every decision is an `arf_cmp` of midpoints.  Radii are never read: this is
+  Layer 0 (point mode, CLAUDE.md rule 1), so no comparison can be undecided and
+  no rigor is claimed.  A NaN midpoint makes every predicate false.
+- feasTol = optTol = 10^-target_digits is built in arb (`arb_ui_pow_ui` +
+  `arb_inv` at the working precision; `arbsdp_solve_params.tol_digits`).  No
+  double round trip and no ceiling: the former `pow(10,-td)` was clamped at
+  td = 300 (it underflows past ~1e-308), silently serving a 330-digit request
+  as a 300-digit one.  A caller-supplied double tolerance is converted exactly
+  (`arb_set_d`; a double is dyadic).
+- The float64 rho_p / rho_d / rho_g / prstatus fields of `arbsdp_convergence`
+  are diagnostic copies; nothing re-decides from them.
+- The cross-precision confirm gate (§6, `arbsdp_adaptive_confirmed`) decides
+  |v_cand - v_conf| <= 10^-td * max(1, |v_cand|) the same way (its former
+  float64 -log10 read any |diff| < ~5e-324 as exact agreement).
+
+Measured effect (2026-11): on the 23-golden corpus at its provenance targets
+(td 1-30), and on max_eig_path_4, min_eig_path_4, sdp_sqrt2, trivial_2x2,
+max_eig_tridiag_3x3 swept at td = 20, 30, 50, 120, the status, iteration count,
+final_prec are UNCHANGED and |value - opt| agrees to 5 significant digits
+(td = 330 aside, below); on these problems the stop is not gap-limited.  rho_p, rho_d, rho_g contract together by ~10^4 per iteration
+(the gamma = 0.9999 step cap), so the residual flags bind at the same iteration
+the arb gap flag does; the float64 gap had collapsed to 0 long before.  The fix
+removes a latent wrong-stop (pinned by `test_iterate`
+`test_convergence_gap_not_quantized`) and the td > 300 ceiling (pinned by
+`test_precision` `test_target_beyond_300_digits`: trivial_2x2 at td = 330 now
+delivers |v - 1| = 1.2e-332, previously 1.2e-304).
 
 **Scaling norms:**
 
@@ -422,6 +464,9 @@ where:
     prstatus  =  (tau - kappa) / max(tau + kappa, 1e-300)
 
 converges to +1 on optimal branch, -1 on infeasibility-certificate branch.
+(arb port: prstatus = (tau-kappa)/(tau+kappa) when tau+kappa > 0, else 0; every
+decision reading prstatus runs after the anti-collapse floor or the solve
+loop's tau, kappa > 0 gate, so the 1e-300 guard is never reached.)
 
 **Anti-collapse floor:** if tau + kappa < 1e-8, return "running" (degenerate
 iterate, no classification possible).
@@ -435,10 +480,19 @@ iterate, no classification possible).
 Resource limits: iter >= iterLimit => "iter-limit"; wall > timeLimitSec => "time-limit";
 stallCount >= stallIterCap => "numerical-difficulty".
 
+**Best iterate and soft-optimal (solve.c, arb midpoints):**
+
+    achieved  =  max(rho_p, rho_d, rho_g, gapAbs / max(1, |pObjPure|))
+                 (+inf when tau <= 0); snapshot on strict decrease
+    soft-optimal  =  mu <= feasTol AND prstatus > 0.5 AND tau >= 1e-6
+
+A non-strict exit returns the best snapshot; a soft-optimal snapshot is lifted
+to OPTIMAL (TS finalizeBestOr, HsdeNtSdpSolver.ts:913-926).
+
 #### §3.8.1 Infeasibility classification (point mode) — bead arb-prec-IPM-epic.2
 
 This sub-test runs AFTER the anti-collapse floor and the optimal check.  It reads
-float64 midpoints (point mode) and sets the Layer-0 status class that steers the
+arb midpoints (point mode; arf comparisons, bead qx4) and sets the Layer-0 status class that steers the
 loop — exactly analogous to ARBSDP_STATUS_OPTIMAL.  It certifies NOTHING.  The
 rigorous ball-verified Farkas certificate is bead b20; CLAUDE.md invariant 8
 governs that separate rigorous status.
@@ -452,6 +506,11 @@ Farkas certificate.
     eps_inf      =  max(feasTol, 1e-8)
     WITNESS_FLOOR  =  1e-6
     TAU_INFEAS   =  1.0      (tau initialises to 1; tau < 1 means genuinely collapsing)
+
+These are CLASSIFICATION constants, not accuracy tolerances: they do not scale
+with target_digits.  A Farkas ray is a direction, so its witness residual is
+floored at 1e-8 however tight feasTol is.  In the arb port 1e-8 and 1e-6 are
+10^-k at the working precision, -0.5 and 1 are exact.
 
 **TAU-COLLAPSE guard (required in addition to prstatus < -0.5):**
 

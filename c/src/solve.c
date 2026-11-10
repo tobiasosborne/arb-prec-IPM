@@ -54,6 +54,7 @@ arbsdp_solve_default_params(arbsdp_solve_params *out)
     out->opt_tol    = ARBSDP_OPT_TOL;        /* 1e-8                     */
     out->iter_limit = ARBSDP_ITER_LIMIT;     /* 500                     */
     out->stall_cap  = ARBSDP_STALL_ITER_CAP; /* 10                      */
+    out->tol_digits = 0;                     /* 0: use the double fields */
 }
 
 void
@@ -259,50 +260,41 @@ iterate_clear_radii(arbsdp_iterate *it)
     mag_zero(arb_radref(it->kappa));
 }
 
-/* achieved = max(rho_p, rho_d, rho_g, gapAbs/objScale), the TS best-iterate
- * ranking metric (HsdeNtSdpSolver.ts:431-435).  gapAbs/objScale is gap_inf
- * (the |pObjPure - dObjPure| absolute flag input) over max(1, |pObjPure|).
- * Computed in double (the ratios are float64 in TS; only their magnitude
- * matters -- POINT mode, rule 1). */
-static double
-achieved_metric(const arbsdp_convergence *conv, const arbsdp_iterate *it)
+/* The best-iterate ranking metric achieved = max(rho_p, rho_d, rho_g,
+ * gapAbs/max(1,|pObjPure|)) (HsdeNtSdpSolver.ts:431-436) is produced by
+ * arbsdp_check_convergence_arb as an arb MIDPOINT at the working precision (bead
+ * arb-prec-IPM-qx4): the float64 version's gapAbs was quantized at 1 ulp of the
+ * objective, so above ~16 digits the ranking compared rounding noise.  Ranking
+ * compares midpoints (point mode, rule 1). */
+static int
+mid_lt(const arb_t a, const arb_t b)
 {
-    double a = conv->rho_p;
-    double pobj_pure;
-    if (conv->rho_d > a) a = conv->rho_d;
-    if (conv->rho_g > a) a = conv->rho_g;
+    const arf_struct *x = arb_midref(a), *y = arb_midref(b);
+    if (arf_is_nan(x) || arf_is_nan(y)) return 0;
+    return arf_cmp(x, y) < 0;
+}
 
-    pobj_pure = arf_get_d(arb_midref(it->pObj), ARF_RND_NEAR)
-              / arf_get_d(arb_midref(it->tau), ARF_RND_NEAR);
-    {
-        /* gapAbs = |pObjPure - dObjPure|; the convergence test already reduced
-         * the absolute gap to a float in flag_abs_gap's comparison, but we
-         * recompute the ratio here exactly as TS:436 to rank iterates. */
-        double dobj_pure = arf_get_d(arb_midref(it->dObj), ARF_RND_NEAR)
-                         / arf_get_d(arb_midref(it->tau), ARF_RND_NEAR);
-        double gap_abs = pobj_pure - dobj_pure;
-        double obj_scale, ratio;
-        if (gap_abs < 0) gap_abs = -gap_abs;
-        obj_scale = pobj_pure < 0 ? -pobj_pure : pobj_pure;
-        if (obj_scale < 1.0) obj_scale = 1.0;
-        ratio = gap_abs / obj_scale;
-        if (ratio > a) a = ratio;
-    }
-    return a;
+static int
+mid_le(const arb_t a, const arb_t b)
+{
+    const arf_struct *x = arb_midref(a), *y = arb_midref(b);
+    if (arf_is_nan(x) || arf_is_nan(y)) return 0;
+    return arf_cmp(x, y) <= 0;
 }
 
 /* Soft-optimal: the HSDE homogeneous convergence indicators are at their limits
  * (mu <= feas_tol, tau-dominant, tau not collapsed) even though the strict
  * 6-flag ratio test floors above 1 (HsdeNtSdpSolver.ts:474-483).  TAU_HEALTHY =
- * 1e-6 keeps the 1/tau purification amplification honest. */
-#define ARBSDP_TAU_HEALTHY 1e-6
+ * 1e-6 keeps the 1/tau purification amplification honest.  Decided on arb
+ * midpoints (bead qx4): mu <= feas_tol must hold for feas_tol = 10^-td with td
+ * beyond the double range; prstatus > 1/2 comes from the arb convergence test.
+ * tau_healthy is the constant 10^-6 set into arb once per solve. */
 static int
 is_soft_optimal(const arbsdp_iterate *it, const arbsdp_convergence *conv,
-                double feas_tol)
+                const arb_t feas_tol, const arb_t tau_healthy)
 {
-    double mu  = arf_get_d(arb_midref(it->mu),  ARF_RND_NEAR);
-    double tau = arf_get_d(arb_midref(it->tau), ARF_RND_NEAR);
-    return mu <= feas_tol && conv->prstatus > 0.5 && tau >= ARBSDP_TAU_HEALTHY;
+    return mid_le(it->mu, feas_tol) && conv->prstatus_tau_dominant
+        && mid_le(tau_healthy, it->tau);
 }
 
 /* -------------------------------------------------------------------------
@@ -325,7 +317,10 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
     arbsdp_regstate    rs;                 /* ONE state carried across iters    */
     arbsdp_direction   d;
     arb_mat_t         *W;                  /* per-block NT scaling              */
-    double             best_achieved = INFINITY;  /* lowest achieved seen        */
+    arb_t              best_achieved;      /* lowest achieved seen (arb mid)   */
+    arb_t              achieved;           /* this iteration's achieved metric */
+    arb_t              feas_tol, opt_tol;  /* arb tolerances (bead qx4)        */
+    arb_t              tau_healthy;        /* TAU_HEALTHY = 1e-6 (soft-optimal)*/
     int                best_soft_optimal = 0;    /* best snapshot is soft-opt   */
     int                have_best = 0;             /* a valid snapshot exists     */
     int                best_iter = 0;             /* iteration of the best snap  */
@@ -349,6 +344,28 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
     arbsdp_direction_init(&d, p);
     arb_init(mu_old);
     arb_init(thresh);
+    arb_init(best_achieved);
+    arb_init(achieved);
+    arb_init(feas_tol);
+    arb_init(opt_tol);
+    arb_init(tau_healthy);
+    arb_pos_inf(best_achieved);
+
+    /* Tolerances in arb (bead arb-prec-IPM-qx4, MATH_SPEC §3.8).  tol_digits > 0
+     * => feas_tol = opt_tol = 10^-tol_digits formed at `prec` (no double round
+     * trip, no 300-digit ceiling).  Otherwise the caller's doubles, converted
+     * EXACTLY (a double is dyadic).  Only the midpoints are read downstream. */
+    if (params->tol_digits > 0) {
+        arb_ui_pow_ui(feas_tol, 10, (ulong) params->tol_digits, prec);
+        arb_inv(feas_tol, feas_tol, prec);
+        mag_zero(arb_radref(feas_tol));
+        arb_set(opt_tol, feas_tol);
+    } else {
+        arb_set_d(feas_tol, params->feas_tol);
+        arb_set_d(opt_tol, params->opt_tol);
+    }
+    arb_ui_pow_ui(tau_healthy, 10, 6, prec);
+    arb_inv(tau_healthy, tau_healthy, prec);       /* TAU_HEALTHY = 1e-6     */
 
     /* per-block NT scaling storage, allocated ONCE (no per-iteration growth) */
     W = flint_malloc((size_t) it->nblocks * sizeof *W);
@@ -375,21 +392,19 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
         }
 
         /* 6-flag convergence (HsdeNtSdpSolver.ts:1043-1132). */
-        arbsdp_check_convergence(&conv, it, params->feas_tol, params->opt_tol,
-                                 prec);
+        arbsdp_check_convergence_arb(&conv, achieved, it, feas_tol, opt_tol,
+                                     prec);
 
         /* Best-iterate tracking by the SCALED achieved metric (TS:431-445):
-         * snapshot whenever `achieved` improves, recording whether the snapshot
-         * satisfies the soft-optimal homogeneous criteria (TS:474-483). */
-        {
-            double achieved = achieved_metric(&conv, it);
-            if (achieved < best_achieved) {
-                copy_iterate_vars(&best, it, prec);
-                best_achieved = achieved;
-                best_iter = iter;
-                best_soft_optimal = is_soft_optimal(it, &conv, params->feas_tol);
-                have_best = 1;
-            }
+         * snapshot whenever `achieved` strictly improves (arb midpoint compare,
+         * bead qx4), recording whether the snapshot satisfies the soft-optimal
+         * homogeneous criteria (TS:474-483). */
+        if (mid_lt(achieved, best_achieved)) {
+            copy_iterate_vars(&best, it, prec);
+            arb_set(best_achieved, achieved);
+            best_iter = iter;
+            best_soft_optimal = is_soft_optimal(it, &conv, feas_tol, tau_healthy);
+            have_best = 1;
         }
 
         /* Strict optimal exit (TS:485-487 term.status !== "running"). */
@@ -524,6 +539,11 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
     flint_free(W);
     arb_clear(mu_old);
     arb_clear(thresh);
+    arb_clear(best_achieved);
+    arb_clear(achieved);
+    arb_clear(feas_tol);
+    arb_clear(opt_tol);
+    arb_clear(tau_healthy);
     arbsdp_direction_clear(&d);
     arbsdp_regstate_clear(&rs);
     arbsdp_iterate_clear(&best);

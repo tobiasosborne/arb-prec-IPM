@@ -4,11 +4,19 @@
  * ==========================================================================
  * POINT MODE -- NOT RIGOROUS (CLAUDE.md rule 1)
  * ==========================================================================
- * This is the Layer-0 termination heuristic that steers the IPM loop.  It reduces
- * the iterate's residuals/objectives to float64 scaled ratios (rho_p, rho_d,
- * rho_g) and a tau-kappa indicator (prstatus), exactly as the TS reference does,
- * and reports a status.  It certifies NOTHING -- the rigorous status comes from
- * Layer 1 (certify.c, later beads).
+ * This is the Layer-0 termination heuristic that steers the IPM loop.  It forms
+ * the TS reference's scaled ratios (rho_p, rho_d, rho_g) and tau-kappa indicator
+ * (prstatus) and reports a status.  It certifies NOTHING -- the rigorous status
+ * comes from Layer 1 (certify.c).
+ *
+ * ARB MIDPOINT ARITHMETIC (bead arb-prec-IPM-qx4, MATH_SPEC §3.8): every ratio,
+ * flag and status DECISION is computed from the iterate's arb MIDPOINTS at the
+ * working precision and decided by arf midpoint comparisons -- never through
+ * float64.  The TS reference does this in float64, where the purified gap
+ * |pObj/tau - dObj/tau| is quantized at 1 ulp of the objective (~2.2e-16 rel), so
+ * any opt_tol below ~1e-16 made the stop decision rounding noise.  Ball radii
+ * are not consulted (point mode, CLAUDE.md rule 1): no comparison can be
+ * "undecided".  The double fields of arbsdp_convergence are DIAGNOSTICS only.
  *
  * ==========================================================================
  * GROUND TRUTH (CLAUDE.md rule 3)
@@ -65,9 +73,12 @@ typedef enum {
 } arbsdp_status;
 
 /*
- * arbsdp_convergence -- the result of the 6-flag test.  rho_* and prstatus are
- * float doubles (point-mode scaled ratios; their magnitude, not their last bit,
- * is what matters).  The six flags are the REL/ABS primal/dual/gap conjuncts.
+ * arbsdp_convergence -- the result of the 6-flag test.  The six flags, `status`
+ * and `prstatus_tau_dominant` are the DECISIONS, computed in arb midpoint
+ * arithmetic at the working precision (bead qx4).  rho_* and prstatus are
+ * float64 copies of the arb ratios for DIAGNOSTICS/logging only: they may
+ * underflow/overflow (e.g. rho_g < 1e-308 reads 0.0) and must never be used to
+ * re-decide convergence.
  */
 typedef struct {
     arbsdp_status status;
@@ -83,6 +94,9 @@ typedef struct {
     int flag_abs_primal;   /* primalInf <= feasTol                        */
     int flag_abs_dual;     /* dualInf   <= feasTol                        */
     int flag_abs_gap;      /* gapAbs    <= optTol  (gapAbs = |pObjPure-dObjPure|) */
+    /* prstatus > 1/2 (tau-dominant branch), decided in arb; read by the solve
+     * driver's soft-optimal test (HsdeNtSdpSolver.ts:474-483). */
+    int prstatus_tau_dominant;
 } arbsdp_convergence;
 
 /*
@@ -92,7 +106,7 @@ typedef struct {
  * ARBSDP_FEAS_TOL / ARBSDP_OPT_TOL for the defaults.  Fills `out`.
  *
  * The scaling norms ||b||_inf and ||C||_F are computed from the problem data at
- * precision `prec` (point mode; converted to double for the ratios).  status is
+ * precision `prec` (point mode; kept in arb for the ratios).  status is
  * ARBSDP_STATUS_OPTIMAL iff rho_p<=1 && rho_d<=1 && rho_g<=1 && prstatus>0.5 and
  * the anti-collapse floor (tau+kappa >= 1e-8) holds; ARBSDP_STATUS_PRIMAL/DUAL_
  * INFEASIBLE iff the (tau,kappa) point-mode test fires (MATH_SPEC §3.8.1);
@@ -100,6 +114,25 @@ typedef struct {
  */
 void arbsdp_check_convergence(arbsdp_convergence *out, const arbsdp_iterate *it,
                               double feas_tol, double opt_tol, slong prec);
+
+/*
+ * arbsdp_check_convergence_arb -- the same test with ARB tolerances (bead qx4).
+ * This is the primary entry point; arbsdp_check_convergence converts its double
+ * tolerances EXACTLY (arb_set_d: a double is a dyadic rational) and calls it.
+ * Use it for tolerances a double cannot carry, e.g. 10^-320 (subnormal) or
+ * 10^-400 (underflows to 0): the precision controller passes 10^-target_digits
+ * built in arb.  Only the MIDPOINTS of feas_tol / opt_tol are read.
+ *
+ * If `achieved` is non-NULL it receives (as an exact midpoint, radius 0) the TS
+ * best-iterate ranking metric (HsdeNtSdpSolver.ts:431-436)
+ *     achieved = max(rho_p, rho_d, rho_g, gapAbs / max(1, |pObjPure|)),
+ * +inf when tau <= 0.  Lower is better; the solve driver snapshots on strict
+ * improvement (arf midpoint compare).
+ */
+void arbsdp_check_convergence_arb(arbsdp_convergence *out, arb_t achieved,
+                                  const arbsdp_iterate *it,
+                                  const arb_t feas_tol, const arb_t opt_tol,
+                                  slong prec);
 
 #ifdef __cplusplus
 }

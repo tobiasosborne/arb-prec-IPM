@@ -411,12 +411,119 @@ test_convergence(void)
     arbsdp_problem_clear(&p);
 }
 
+/* ----- Test 4: gap test is NOT float64-quantized (bead arb-prec-IPM-qx4) --
+ *
+ * The purified gap |pObj/tau - dObj/tau| must be formed at the working
+ * precision, not as a difference of two doubles.  A float64 gap is quantized at
+ * 1 ulp of the objective (2^-54 ~ 5.55e-17 for an objective of 0.4), so with an
+ * optimality tolerance below ~1e-16 the double test is decided by rounding, not
+ * by the gap.  Two constructed iterates (prec=256, tau=1, kappa=1e-40, zero
+ * residuals so only the gap flag decides) discriminate both failure directions:
+ *
+ *   (a) FIRES WRONGLY: pObj = 0.4, dObj = 0.4 + 1e-20.  Both round to the same
+ *       double, so the float64 gap is exactly 0 and the double test declares
+ *       OPTIMAL at opt_tol = 1e-30.  The true rho_g = 1e-20/1e-30 = 1e10:
+ *       RUNNING, rel/abs gap flags false.
+ *   (b) MISSES WRONGLY: pObj, dObj = h -+ 1e-35 straddling h = d0 + 2^-55, the
+ *       midpoint between the double d0 = double(0.4) and its successor.  Round-
+ *       to-nearest sends them to DIFFERENT doubles one ulp apart, so the
+ *       float64 gap is 5.55e-17 and the double test never fires at
+ *       opt_tol = 1e-30.  The true gap is 2e-35: rho_g = 2e-5, OPTIMAL.
+ *
+ * The tolerances 1e-30 are passed through the double API on purpose: a double
+ * tolerance is a well-defined (dyadic) number; what must not be double is the
+ * GAP.  (c) pins the arb-tolerance API at a 320-digit tolerance, which a double
+ * cannot represent (10^-320 is subnormal; 10^-330 underflows to 0).          */
+static void
+set_gap_iterate(arbsdp_iterate *it, const arb_t pobj, const arb_t dobj)
+{
+    for (int i = 0; i < it->m; i++)
+        arb_zero(&it->r_p[i]);
+    for (int b = 0; b < it->nblocks; b++)
+        arb_mat_zero(it->R_d[b]);
+    arb_one(it->tau);
+    arb_one(it->kappa);
+    arb_mul_2exp_si(it->kappa, it->kappa, -133);      /* ~1e-40 */
+    arb_set(it->pObj, pobj);
+    arb_set(it->dObj, dobj);
+    arb_zero(it->primal_inf);
+    arb_zero(it->dual_inf);
+    arb_zero(it->gap_inf);
+    arb_zero(it->mu);
+}
+
+static void
+test_convergence_gap_not_quantized(void)
+{
+    char path[1024];
+    arbsdp_problem p;
+    arbsdp_iterate it;
+    arbsdp_convergence cv;
+    arb_t po, dobj, t;
+
+    arbsdp_problem_init(&p);
+    golden_path(path, sizeof path, "sdp_sqrt2");
+    CHECK(arbsdp_read_sdpa(&p, path) == 0, "gapq: read sdp_sqrt2");
+    arbsdp_iterate_init(&it, &p, PREC);
+    arb_init(po); arb_init(dobj); arb_init(t);
+
+    /* (a) fires wrongly under float64: true rel gap 1e-20 >> opt_tol 1e-30. */
+    arb_set_str(po, "0.4", PREC);
+    arb_set_str(t, "1e-20", PREC);
+    arb_add(dobj, po, t, PREC);
+    CHECK(arf_get_d(arb_midref(po), ARF_RND_NEAR) ==
+          arf_get_d(arb_midref(dobj), ARF_RND_NEAR),
+          "gapq(a) precondition: pObj and dObj must collide in float64");
+    set_gap_iterate(&it, po, dobj);
+    arbsdp_check_convergence(&cv, &it, 1e-30, 1e-30, PREC);
+    CHECK(!cv.flag_rel_gap,
+          "gapq(a): rel gap flag fired on a 1e-20 gap at opt_tol 1e-30 "
+          "(float64 gap quantization)");
+    CHECK(!cv.flag_abs_gap,
+          "gapq(a): abs gap flag fired on a 1e-20 gap at opt_tol 1e-30");
+    CHECK(cv.status == ARBSDP_STATUS_RUNNING,
+          "gapq(a): status OPTIMAL on a 1e-20 gap at opt_tol 1e-30");
+    CHECK(cv.rho_g > 1e9 && cv.rho_g < 1e11,
+          "gapq(a): rho_g diagnostic must be ~1e10");
+
+    /* (b) misses wrongly under float64: true gap 2e-35 << opt_tol 1e-30. */
+    {
+        arb_t h;
+        arb_init(h);
+        arb_set_d(h, 0.4);                      /* d0 = double(0.4), exact    */
+        arb_one(t);
+        arb_mul_2exp_si(t, t, -55);             /* half an ulp of d0 (2^-54)  */
+        arb_add(h, h, t, PREC);                 /* rounding midpoint, exact   */
+        arb_set_str(t, "1e-35", PREC);
+        arb_sub(po, h, t, PREC);
+        arb_add(dobj, h, t, PREC);
+        arb_clear(h);
+    }
+    CHECK(arf_get_d(arb_midref(po), ARF_RND_NEAR) !=
+          arf_get_d(arb_midref(dobj), ARF_RND_NEAR),
+          "gapq(b) precondition: pObj and dObj must round to different doubles");
+    set_gap_iterate(&it, po, dobj);
+    arbsdp_check_convergence(&cv, &it, 1e-30, 1e-30, PREC);
+    CHECK(cv.flag_rel_gap,
+          "gapq(b): rel gap flag missed a 2e-35 gap at opt_tol 1e-30 "
+          "(float64 gap quantization)");
+    CHECK(cv.flag_abs_gap,
+          "gapq(b): abs gap flag missed a 2e-35 gap at opt_tol 1e-30");
+    CHECK(cv.status == ARBSDP_STATUS_OPTIMAL,
+          "gapq(b): status not OPTIMAL on a 2e-35 gap at opt_tol 1e-30");
+
+    arb_clear(po); arb_clear(dobj); arb_clear(t);
+    arbsdp_iterate_clear(&it);
+    arbsdp_problem_clear(&p);
+}
+
 int
 main(void)
 {
     test_adjointness();
     test_residuals_vanish();
     test_convergence();
+    test_convergence_gap_not_quantized();
 
     if (failures != 0) {
         fprintf(stderr, "test_iterate: %d check(s) FAILED\n", failures);

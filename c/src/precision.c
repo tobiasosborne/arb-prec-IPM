@@ -97,37 +97,52 @@ achieved_digits_from_mu(const arb_t mu)
  * point-mode solve, NOT a rigor claim; rigor is Layer 1's bracket (b18/b19).
  * A precision-starved OPTIMAL whose value MOVES when precision rises is the p68
  * class -- here it is rejected (d < target_digits).
+ *
+ * ARB MIDPOINT DECISION (bead arb-prec-IPM-qx4): "d >= target_digits" is decided
+ * as  |v_cand - v_conf| <= 10^-target_digits * max(1, |v_cand|)  on arf
+ * midpoints at precision max(prec, bits(target_digits) + 64).  The former
+ * float64 path (-log10 of a double) read any |diff| below ~5e-324 as 0 =>
+ * "+inf digits" and confirmed every target past ~323 digits.  A NaN midpoint
+ * never confirms.
  */
 int
 arbsdp_adaptive_confirmed(arbsdp_solve_status conf_status,
                           const arb_t v_cand, const arb_t v_conf,
                           int target_digits, slong prec)
 {
-    arb_t err, rel, one;
-    double d;
+    arf_t err, rel, tol;
+    arb_t t;
+    slong wp;
+    int ok;
 
     /* The confirming solve must itself be a clean OPTIMAL (precision.h). */
     if (conf_status != ARBSDP_SOLVE_OPTIMAL) return 0;
+    if (target_digits < 0) target_digits = 0;
 
-    arb_init(err); arb_init(rel); arb_init(one);
+    /* Enough bits to resolve a target_digits-digit difference (3.33 b/digit). */
+    wp = (slong) target_digits * 10 / 3 + 64;
+    if (wp < prec) wp = prec;
 
-    arb_sub(err, v_cand, v_conf, prec);
-    arb_abs(err, err);
+    arf_init(err); arf_init(rel); arf_init(tol);
+    arb_init(t);
 
-    arb_abs(rel, v_cand);
-    arb_one(one);
-    if (arb_lt(rel, one)) arb_set(rel, one);
-    arb_div(err, err, rel, prec);
+    arf_sub(err, arb_midref(v_cand), arb_midref(v_conf), wp, ARF_RND_NEAR);
+    arf_abs(err, err);
 
-    if (arb_is_zero(err) || !arb_is_finite(err)) {
-        d = 1e9;                                /* exact agreement => +inf       */
-    } else {
-        double e = arf_get_d(arb_midref(err), ARF_RND_NEAR);
-        d = (e <= 0.0) ? 1e9 : -log10(e);
-    }
+    /* rel = max(1, |v_cand|); tol = 10^-target_digits * rel. */
+    arf_abs(rel, arb_midref(v_cand));
+    arf_one(tol);
+    if (arf_cmp(rel, tol) < 0) arf_set(rel, tol);
 
-    arb_clear(err); arb_clear(rel); arb_clear(one);
-    return d >= (double) target_digits;
+    arb_ui_pow_ui(t, 10, (ulong) target_digits, wp);
+    arb_inv(t, t, wp);
+    arf_mul(tol, arb_midref(t), rel, wp, ARF_RND_NEAR);
+
+    ok = !arf_is_nan(err) && !arf_is_nan(tol) && arf_cmp(err, tol) <= 0;
+
+    arf_clear(err); arf_clear(rel); arf_clear(tol);
+    arb_clear(t);
+    return ok;
 }
 
 /*
@@ -152,7 +167,6 @@ arbsdp_solve_adaptive(arbsdp_adaptive_result *res, const arbsdp_problem *p,
 {
     arbsdp_result scratch;            /* confirming solves land here (local)   */
     arbsdp_solve_params sp;
-    double tol;
     slong  prec, prec_max, prec0, p_cand;
     int    escalation, cap, count, met, have_cand, res_solved;
 
@@ -163,16 +177,20 @@ arbsdp_solve_adaptive(arbsdp_adaptive_result *res, const arbsdp_problem *p,
     if (prec_max < prec0) prec_max = prec0;       /* sane: cap >= start        */
 
     /* Inner feas/opt tolerance = 10^-target_digits so the gap test fires at the
-     * requested accuracy (precision.h TARGET/TOLERANCE COUPLING).  Clamp the
-     * exponent so pow() stays finite for absurd targets. */
+     * requested accuracy (precision.h TARGET/TOLERANCE COUPLING).  Bead
+     * arb-prec-IPM-qx4: the tolerance is handed to the solve as tol_digits and
+     * built in arb there (10^-td at the working precision) -- no pow() round
+     * trip and NO ceiling (the former silent clamp at td=300 is gone; a target
+     * the precision cap cannot reach ends in an honest ADAPTIVE_LIMIT).  The
+     * double fields are diagnostic only (they underflow to 0 past td~323) and
+     * are ignored by arbsdp_solve when tol_digits > 0. */
     {
         int td = pp->target_digits;
-        if (td < 1)   td = 1;
-        if (td > 300) td = 300;
-        tol = pow(10.0, -(double) td);
+        if (td < 1) td = 1;
+        sp.tol_digits = td;
+        sp.feas_tol   = pow(10.0, -(double) td);
+        sp.opt_tol    = sp.feas_tol;
     }
-    sp.feas_tol   = tol;
-    sp.opt_tol    = tol;
     sp.iter_limit = pp->iter_limit > 0 ? pp->iter_limit : ARBSDP_ITER_LIMIT;
     sp.stall_cap  = pp->stall_cap  > 0 ? pp->stall_cap  : ARBSDP_STALL_ITER_CAP;
 

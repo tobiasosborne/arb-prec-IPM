@@ -436,8 +436,80 @@ test_confirm_gate(void)
     CHECK(arbsdp_adaptive_confirmed(ARBSDP_SOLVE_NUMERICAL, v_cand, v_conf, 2, WORKPREC) == 0,
           "confirm: a non-OPTIMAL confirming solve must NOT confirm (point-mode stop)");
 
+    /* Case 5 (bead arb-prec-IPM-qx4): the agreement decision must not go
+     * through double.  |diff| = 1e-330 underflows to 0.0 in float64, which the
+     * double path read as "exact agreement" (+inf digits) and confirmed at any
+     * target.  At target 340 the candidate agrees to only 330 digits -> 0. */
+    arb_set_str(v_conf, "1.0", 2048);
+    arb_set_str(v_cand, "1e-330", 2048);
+    arb_add(v_cand, v_cand, v_conf, 2048);
+    CHECK(arbsdp_adaptive_confirmed(ARBSDP_SOLVE_OPTIMAL, v_cand, v_conf, 340, 2048) == 0,
+          "confirm: 330-digit agreement must NOT confirm a 340-digit target "
+          "(float64 underflow of |diff|)");
+    /* ...and the same pair at target 320 IS confirmed (330 >= 320). */
+    CHECK(arbsdp_adaptive_confirmed(ARBSDP_SOLVE_OPTIMAL, v_cand, v_conf, 320, 2048) == 1,
+          "confirm: 330-digit agreement must confirm a 320-digit target");
+
     arb_clear(v_cand); arb_clear(v_conf);
-    printf("\n  CONFIRM GATE: 4 constructed cases pinned (p68 cross-precision stability).\n");
+    printf("\n  CONFIRM GATE: 6 constructed cases pinned (p68 cross-precision stability).\n");
+}
+
+/* ------------------------------------------------------------------------- *
+ * Test 8: NO SILENT 300-DIGIT CEILING (bead arb-prec-IPM-qx4).                *
+ *                                                                              *
+ * precision.c used to clamp target_digits at 300 (pow(10,-td) underflows past  *
+ * ~1e-308) and the 6-flag test ran in float64, so a 330-digit request was       *
+ * silently served as a 300-digit one: measured before the fix, trivial_2x2 at  *
+ * td=330 returned ADAPTIVE_OPTIMAL with |v - 1| = 1.2e-304 (303.9 digits).      *
+ * td=330 is chosen past the double range on purpose: 10^-330 is 0.0 in float64, *
+ * so a tolerance routed through a double (instead of built in arb) also fails   *
+ * here.  trivial_2x2's optimum is exactly 1 (golden/trivial_2x2), so the        *
+ * reference has unlimited digits.  The accuracy check runs in arb (|v-1| <=     *
+ * 10^-330 on midpoints) -- a double digit count would underflow too.           *
+ * ------------------------------------------------------------------------- */
+static void
+test_target_beyond_300_digits(void)
+{
+    arbsdp_problem p;
+    arbsdp_adaptive_result r;
+    arbsdp_precision_params pp;
+    arb_t err, tol;
+    const int td = 330;
+    const slong cmp = 4096;
+
+    if (!load_golden(&p, "trivial_2x2")) {
+        CHECK(0, "td330: read trivial_2x2");
+        return;
+    }
+    arbsdp_precision_default_params(&pp);
+    pp.prec0         = 128;
+    pp.prec_max      = 8192;
+    pp.target_digits = td;
+
+    arbsdp_solve_adaptive(&r, &p, &pp);
+
+    arb_init(err); arb_init(tol);
+    arb_get_mid_arb(err, r.res.value);
+    arb_sub_ui(err, err, 1, cmp);
+    arb_abs(err, err);
+    arb_ui_pow_ui(tol, 10, (ulong) td, cmp);
+    arb_inv(tol, tol, cmp);
+
+    CHECK(r.status == ARBSDP_ADAPTIVE_OPTIMAL,
+          "td330: trivial_2x2 must reach ADAPTIVE_OPTIMAL at target_digits=330");
+    CHECK(arf_cmp(arb_midref(err), arb_midref(tol)) <= 0,
+          "td330: |value - 1| must be <= 1e-330 (target_digits clamped or tolerance underflowed?)");
+
+    printf("    td330 trivial_2x2: status=%s final_prec=%ld iters=%d"
+           " prec_history_len=%d |v-1|=",
+           adaptive_status_name(r.status), (long) r.final_prec, r.res.iters,
+           r.prec_history_len);
+    arf_printd(arb_midref(err), 5);
+    printf("\n");
+
+    arb_clear(err); arb_clear(tol);
+    arbsdp_adaptive_result_clear(&r);
+    arbsdp_problem_clear(&p);
 }
 
 /* ill_conditioned_3x3 analytic optimum (golden/ill_conditioned_3x3/provenance.json
@@ -550,6 +622,7 @@ main(void)
     test_mutation_guards();
     test_confirm_gate();
     test_p68_victims_confirmed();
+    test_target_beyond_300_digits();
 
     if (failures != 0) {
         fprintf(stderr, "\ntest_precision: %d check(s) FAILED\n", failures);
