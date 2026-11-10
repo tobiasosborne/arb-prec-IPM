@@ -54,13 +54,16 @@ CheckProblem[name_, computedVal_] := Module[
 ];
 
 (* ------------------------------------------------------------------
-   FormatNum: exact same function as in generate.wl
+   FormatNum: exact same function as in generate.wl (incl. the bead
+   arb-prec-IPM-zuf sign fix: RealDigits drops the sign, so it is prepended).
    ------------------------------------------------------------------ *)
-FormatNum[x_] := Module[{dec, digits, exp, intPart, fracPart, zeros},
-  dec = RealDigits[x, 10, 65];
+FormatNum[x_] := Module[{ax, sgn, dec, digits, exp, intPart, fracPart, zeros, body},
+  sgn = If[x < 0, "-", ""];
+  ax  = Abs[x];
+  dec = RealDigits[ax, 10, 65];
   digits = dec[[1]];
   exp    = dec[[2]];
-  Which[
+  body = Which[
     exp >= 1 && exp <= 65,
       intPart  = StringJoin[ToString /@ Take[digits, exp]];
       fracPart = StringJoin[ToString /@ Drop[digits, exp]];
@@ -70,8 +73,9 @@ FormatNum[x_] := Module[{dec, digits, exp, intPart, fracPart, zeros},
       fracPart = zeros <> StringJoin[ToString /@ digits];
       "0." <> fracPart,
     True,
-      ToString[N[x, 65], InputForm]
-  ]
+      ToString[N[ax, 65], InputForm]
+  ];
+  sgn <> body
 ];
 
 (* ================================================================

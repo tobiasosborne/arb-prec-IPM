@@ -14,12 +14,19 @@
 (* ------------------------------------------------------------------
    FormatNum: convert exact/symbolic number to plain decimal string
    with 65 significant digits, no scientific notation.
+   SIGN (bead arb-prec-IPM-zuf): RealDigits returns MAGNITUDE digits only
+   (RealDigits[-1/2,10,65] -> the digits of 1/2), so the sign is taken
+   separately and prepended; the magnitude is formatted from Abs[x].  Same
+   fix as generate_stress.wl's FormatNum.  Before it, a negative entry would
+   have been written unsigned (silent golden corruption, CLAUDE.md rule 2).
    ------------------------------------------------------------------ *)
-FormatNum[x_] := Module[{dec, digits, exp, intPart, fracPart, zeros},
-  dec = RealDigits[x, 10, 65];
+FormatNum[x_] := Module[{ax, sgn, dec, digits, exp, intPart, fracPart, zeros, body},
+  sgn = If[x < 0, "-", ""];
+  ax  = Abs[x];
+  dec = RealDigits[ax, 10, 65];
   digits = dec[[1]];
   exp    = dec[[2]];
-  Which[
+  body = Which[
     exp >= 1 && exp <= 65,
       intPart  = StringJoin[ToString /@ Take[digits, exp]];
       fracPart = StringJoin[ToString /@ Drop[digits, exp]];
@@ -30,8 +37,9 @@ FormatNum[x_] := Module[{dec, digits, exp, intPart, fracPart, zeros},
       "0." <> fracPart,
     True,
       (* Should not occur for our problem values; fallback *)
-      ToString[N[x, 65], InputForm]
-  ]
+      ToString[N[ax, 65], InputForm]
+  ];
+  sgn <> body
 ];
 
 (* ------------------------------------------------------------------
