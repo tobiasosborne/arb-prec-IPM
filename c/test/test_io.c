@@ -471,6 +471,62 @@ test_read_uninitialized(void)
     arbsdp_problem_clear(&p); /* frees ONLY the real heap read_sdpa allocated */
 }
 
+/* ----- Test 8: non-finite / non-literal value tokens (bead 37w) ------------
+ * FLINT 3.0.1 arb_set_str ACCEPTS (rc=0) far more than a decimal literal --
+ * measured by probe: "inf"/"+inf"/"-Inf"/"INF" -> +-inf, "nan"/"NaN"/"-nan" ->
+ * nan, "[inf]"/"[nan]", ball syntax "1+/-0.1" / "[1+/-0.1]" / "[+/-1]" / "[1]"
+ * (a radius on PROBLEM DATA), and "--1" (parsed as +1: a silent SIGN FLIP).
+ * ("infinity", "0x10", "1d5", "1/3" it already rejects.)  Problem data are exact
+ * point decimals, so every value token -- each b_i AND each entry value -- must
+ * be a plain finite decimal / scientific literal; anything else is a malformed
+ * problem and read_sdpa must return nonzero (CLAUDE.md rule 5).
+ * The positive control guards against over-tightening: every legal literal
+ * shape (".5", "5.", "+5", "-0", "1E5", "1e+5", "1.5e-3") must still parse. */
+static void
+test_nonfinite_tokens(void)
+{
+    static const char *bad[] = {
+        "inf", "+inf", "-inf", "Inf", "-Inf", "INF", "infinity",
+        "nan", "NaN", "NAN", "-nan", "+nan", "[inf]", "[nan]",
+        "1+/-0.1", "[1+/-0.1]", "[+/-1]", "[1]", "1+/-inf", "--1", "+-1",
+        "1e", "e5", ".", "-", "1.2.3", "0x10",
+        NULL
+    };
+    char content[256], what[160];
+
+    for (int k = 0; bad[k] != NULL; k++) {
+        /* (a) as a b value */
+        snprintf(content, sizeof content, "1\n1\n2\n%s\n0 1 1 1 1.0\n", bad[k]);
+        snprintf(what, sizeof what, "37w: b value token \"%s\" must be rejected", bad[k]);
+        expect_fail(content, what);
+        /* (b) as a constraint-matrix entry value */
+        snprintf(content, sizeof content, "1\n1\n2\n1.0\n1 1 1 2 %s\n", bad[k]);
+        snprintf(what, sizeof what, "37w: entry value token \"%s\" must be rejected", bad[k]);
+        expect_fail(content, what);
+    }
+
+    /* positive control: all legal literal shapes parse, b and entries. */
+    {
+        char path[] = "/tmp/arbsdp_io_testXXXXXX";
+        int fd = mkstemp(path);
+        arbsdp_problem p;
+        int rc;
+        if (fd < 0) {
+            fprintf(stderr, "FATAL: mkstemp failed\n");
+            exit(EXIT_FAILURE);
+        }
+        close(fd);
+        write_tmp(path, "3\n1\n2\n.5 5. +5\n"
+                        "0 1 1 1 -0\n0 1 1 2 1E5\n0 1 2 2 1e+5\n"
+                        "1 1 1 1 1.5e-3\n2 1 2 2 -2.25E-01\n3 1 1 2 007\n");
+        arbsdp_problem_init(&p);
+        rc = arbsdp_read_sdpa(&p, path);
+        CHECK(rc == 0, "37w: legal decimal/scientific literals must still parse");
+        arbsdp_problem_clear(&p);
+        remove(path);
+    }
+}
+
 int
 main(void)
 {
@@ -481,6 +537,7 @@ main(void)
     test_mutation_2v();
     test_b_vector();
     test_read_uninitialized();
+    test_nonfinite_tokens();
 
     if (failures != 0) {
         fprintf(stderr, "test_io: %d check(s) FAILED\n", failures);

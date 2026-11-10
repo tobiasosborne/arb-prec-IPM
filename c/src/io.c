@@ -210,16 +210,52 @@ next_token_dup(char **cursor)
     return out;
 }
 
-/* Validate that a decimal string parses as an arb (no garbage).  Returns 0 if
- * it parses cleanly at a probe precision, nonzero otherwise.  arb_set_str
- * returns nonzero on a malformed string. */
+/* Validate that a value token is a plain FINITE decimal / scientific literal.
+ * Returns 0 if valid, nonzero otherwise.
+ *
+ * Bead 37w: arb_set_str's return code alone is NOT a sufficient check.  FLINT
+ * 3.0.1 arb_set_str returns 0 (success) on "inf"/"-Inf"/"INF", "nan"/"NaN",
+ * "[inf]"/"[nan]", ball syntax "1+/-0.1" / "[1+/-0.1]" / "[+/-1]" / "[1]", and
+ * "--1" (read as +1, a silent sign flip) -- all measured by probe.  Problem data
+ * are exact point decimals (problem.h stores the decimal string verbatim), so a
+ * radius, a non-finite value or a doubled sign is a malformed problem
+ * (CLAUDE.md rule 5).  We therefore whitelist the literal grammar
+ *     [+-]? ( D+ ( '.' D* )? | '.' D+ ) ( [eE] [+-]? D+ )?
+ * and THEN require arb_set_str to succeed and give a finite value (belt and
+ * braces: the grammar already excludes every non-finite spelling). */
 static int
 decimal_is_valid(const char *s)
 {
+    const char *q = s;
+    int ndig = 0;
     arb_t probe;
     int bad;
+
+    if (*q == '+' || *q == '-')
+        q++;
+    while (isdigit((unsigned char) *q)) { q++; ndig++; }
+    if (*q == '.') {
+        q++;
+        while (isdigit((unsigned char) *q)) { q++; ndig++; }
+    }
+    if (ndig == 0)
+        return 1;                         /* no mantissa digits */
+    if (*q == 'e' || *q == 'E') {
+        int nexp = 0;
+        q++;
+        if (*q == '+' || *q == '-')
+            q++;
+        while (isdigit((unsigned char) *q)) { q++; nexp++; }
+        if (nexp == 0)
+            return 1;                     /* dangling exponent */
+    }
+    if (*q != '\0')
+        return 1;                         /* trailing garbage (inf, +/-, [..]) */
+
     arb_init(probe);
     bad = arb_set_str(probe, s, 64);
+    if (!bad && !arb_is_finite(probe))
+        bad = 1;
     arb_clear(probe);
     return bad ? 1 : 0;
 }
