@@ -726,6 +726,56 @@ where the three regularizers are (Regularization.ts:96-115, Defaults.ts:34-49):
 Initial (per-iteration) values: delta_p = 0, delta_d = 0, delta_g = initialJitter = 1e-12.
 The delta values carry over ACROSS iterations (accumulating).
 
+#### 4.1.1 Audition: the absolute constants (bead arb-prec-IPM-pp8)
+
+All of `CAP_P = 1e-2`, `CAP_D = CAP_G = 1e2`, `BUMP_BASE = 1e-12`,
+`DIAG_THRESH_REL = 1e-10` and `INITIAL_JITTER = 1e-12` are absolute float64
+defaults (Defaults.ts:40-46). Only `INITIAL_JITTER` is live on the corpus:
+across every configuration measured (status quo, the h62 midpoint fix, pw1,
+and every delta_g variant below) the 26-golden corpus performs **zero**
+regularization bumps, so the caps, the bump base and the diagnose threshold
+are never exercised and could not be auditioned by measurement. The one case
+that does reach the bump path is a scratch stress problem (sdp_sqrt2 with the
+x_11 = 1 row duplicated, singular Schur M), which reaches only the first bump.
+
+What the standing lift does (trace, sdp_sqrt2, prec 2048, tol 1e-50, no S
+jitter, pre-h62 code): with delta_g = 1e-12 the Schur solve satisfies (M + 1e-12 I) dy = rhs,
+so the primal Newton equation is off by 1e-12 * dy; the primal residual falls
+~3e-3 per iteration while mu falls 1e-4 (pinf/mu grows from 13 to 6e14 over
+it 12-21). With delta_g = 0 the Newton residual is at roundoff and pinf tracks
+mu. In the TS/float64 setting the lift is harmless; here it caps the primal
+residual reduction rate.
+
+Candidates (on top of h62 + pw1; corpus sum iters / sum log2 final_prec; dup =
+the dependent-row stress case at td 30, iters / final_prec / bumps):
+
+| delta_g policy | Corpus | Gate | max_eig_path_16 | sdp_sqrt2_td50 | dup td30 |
+|----------------|--------|------|-----------------|----------------|----------|
+| **status quo: init 1e-12, carried** | **195 / 195** | pass | 7 / 128 | 22 / 1024 | 13 / 512 / 0 |
+| init 0 (lift only after a failed factor) | 208 / 196 | pass | 21 / 128 | 18 / 1024 | 14 / 512 / 1 |
+| init 0 + max_i M_ii 2^(-prec/2) per factor | 192 / 196 | FAIL (max_eig_path_4_td50 LIMIT) | 7 / 128 | 18 / 1024 | 13 / 1024 / 0 |
+| init 0 + max_i M_ii 2^(-prec) per factor | 208 / 195 | pass | 21 / 128 | 18 / 1024 | 14 / 512 / 1 |
+
+Decision: **keep the status quo for now** -- the measurement does not support
+a change. The theory argues for removal (SDPA's parameter set has no
+regularization at all; Clarabel's static term is 1e-8 constant plus
+eps(T)^2 * max|diag| proportional and is always paired with iterative
+refinement against the unregularized KKT, reltol/abstol 1e-12, up to 10
+passes), and init 0 does make sdp_sqrt2_td50 faster (22 -> 18). But on the
+corpus the 1e-12 lift is load-bearing by accident: at 128 bits it damps the
+same open direction-numerics defect noted in §3.3.1 (max_eig_path_16 at 128
+bits: the primal Newton-equation residual reaches 1e-4 against a primal
+residual of 1e-10 at mu = 8e-10 with init 0, and the solve crawls 14
+iterations at alpha ~0.01; with 1e-12 it is 2e-5 and the solve finishes at
+iteration 7). The 2^(-prec/2) floor lands max_eig_path_4_td50 on the wrong
+side of its knife edge. Revisit after that defect is fixed, jointly with
+iterative refinement on the Schur solve (bead nux): with refinement the lift
+stops perturbing the solved system and init 0 vs 1e-12 becomes moot.
+Caps / bump base / diagnose threshold: unchanged, no measurement possible on
+the corpus; on the dup case the absolute bump base 1e-12 (first bump 1e-10)
+converges as fast as the relative floor and at lower precision (td 30: 512
+vs 1024 bits; td 50: 1024 vs 2048).
+
 ### 4.2 Failure-diagnosis heuristic
 
 When Cholesky fails at row `r`, diagnose the tier to bump
