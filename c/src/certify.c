@@ -33,6 +33,34 @@
 #define ARBSDP_CERTIFY_TAU_HEALTHY 1e-6
 
 /* ---------------------------------------------------------------------------
+ * sense_is_max -- the MAXIMIZE GUARD (bead arb-prec-IPM-agc, review F3).
+ *
+ * Every objective-dependent Layer-1 result in this file is derived for the
+ * EXTERNAL MAX problem  max <C_file,X>  (MATH_SPEC §5.4 sign locus y_ext =
+ * -(y/tau); §5.5; the oc7 primal Rayleigh bound, a lower bound only for a max;
+ * §5.7.2 the recession ray <C_file,X_hat> > 0, unbounded only for a max).  On a
+ * minimize problem (p->maximize == 0, reachable through the public API since
+ * bead n1x) those formulas certify the WRONG objective -- the worst output class
+ * (CLAUDE.md rule 2/5).  Until the real minimize certification lands (bead
+ * arb-prec-IPM-fjw) the callers refuse with an honest non-certifying result.
+ * Returns 1 iff p->maximize; otherwise prints one stderr diagnostic naming the
+ * refusing entry point and returns 0.  No abort(): this is a library call that
+ * already reports through statuses.
+ * ------------------------------------------------------------------------- */
+static int
+sense_is_max(const arbsdp_problem *p, const char *who)
+{
+    if (p->maximize)
+        return 1;
+    fprintf(stderr,
+            "arbsdp: %s: minimize problem (maximize=0) refused -- Layer-1 "
+            "certification is derived for the external MAX problem only "
+            "(bead arb-prec-IPM-fjw); returning a non-certifying result\n",
+            who);
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
  * arbsdp_verified_psd
  *
  * Rump, BIT 2006, 46:433-452, Cor 2.4: a successfully completed (ball/interval)
@@ -1485,6 +1513,11 @@ arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
     assert(lb_out != NULL && p != NULL && it != NULL
            && "primal_lower_bound: lb_out, p, it non-NULL");
 
+    /* MAXIMIZE GUARD (agc): a feasible point's objective lower-bounds a MAX
+     * optimum only; for a MIN it is an UPPER bound -> not applicable. */
+    if (!sense_is_max(p, "arbsdp_primal_lower_bound"))
+        return 0;
+
     /* APPLICABILITY part 1 (cheap structural gate): one constraint per block. */
     if (p->nblocks != p->m)
         return 0;
@@ -1649,6 +1682,15 @@ arbsdp_certify_bracket(arb_t lb, arb_t ub, const arbsdp_problem *p,
     assert(it->nblocks == p->nblocks
            && "certify_bracket: it->nblocks != p->nblocks");
     assert(it->m == p->m && "certify_bracket: it->m != p->m");
+
+    /* MAXIMIZE GUARD (agc): the bracket below is the external-MAX bracket (sign
+     * locus, oc7 primal tightening).  A minimize problem gets the honest
+     * [-inf, +inf] + INCONCLUSIVE, never a wrong-objective "rigorous" bracket. */
+    if (!sense_is_max(p, "arbsdp_certify_bracket")) {
+        arb_neg_inf(lb);
+        arb_pos_inf(ub);
+        return ARBSDP_CERTIFY_INCONCLUSIVE;
+    }
 
     /* TAU GUARD (rule 5): an unhealthy tau means the HSDE iterate is on the
      * infeasibility path (b20), not an approximate optimum.  Do NOT purify or
@@ -1878,6 +1920,12 @@ arbsdp_verify_dual_infeasible(const arbsdp_problem *p, const arbsdp_iterate *it,
 
     assert(p != NULL && it != NULL && "verify_dual_infeasible: p, it non-NULL");
 
+    /* MAXIMIZE GUARD (agc): <C_file,E_kk> > 0 makes E_kk an UNBOUNDED ray only
+     * for a MAX; for a MIN it is an improving-away direction (a minimize problem
+     * with such a ray can be bounded and dual-feasible).  Not certified -> 0. */
+    if (!sense_is_max(p, "arbsdp_verify_dual_infeasible"))
+        return 0;
+
     nb = it->nblocks;
     if (nb <= 0)
         return 0;
@@ -1963,6 +2011,17 @@ arbsdp_certify(arb_t lb, arb_t ub, const arbsdp_problem *p,
         arb_neg_inf(lb);
         arb_pos_inf(ub);
         return ARBSDP_CERTIFY_PRIMAL_INFEASIBLE;
+    }
+    /* MAXIMIZE GUARD (agc).  The primal Farkas test above is SENSE-INDEPENDENT
+     * (MATH_SPEC §5.7.1: sum_i y_i A_i <= 0 and b^T y > 0 refute the feasible set
+     * {X >= 0 : <A_i,X> = b_i}; C and the sense never enter), so it stays valid
+     * for a minimize problem.  The dual-infeasibility ray (§5.7.2) and the
+     * bracket (§5.4/§5.5) are external-MAX results: refuse them here (one
+     * diagnostic) with the honest [-inf, +inf] + INCONCLUSIVE. */
+    if (!sense_is_max(p, "arbsdp_certify")) {
+        arb_neg_inf(lb);
+        arb_pos_inf(ub);
+        return ARBSDP_CERTIFY_INCONCLUSIVE;
     }
     if (arbsdp_verify_dual_infeasible(p, it, prec_c)) {
         arb_neg_inf(lb);

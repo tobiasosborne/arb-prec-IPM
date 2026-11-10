@@ -1243,6 +1243,20 @@ b^T y sign (beta_lb in {-10.16, -10.16, 0, -5.779}), and the 2 primal goldens
 have no qualifying dual coordinate -- so the ordering yields exactly one cert on
 the 5 single-class goldens and the correct primal cert on the both-class one.
 
+**Objective-sense guard (bead agc).**  §5.4/§5.5 (the y_ext = -(y/tau) sign
+locus and the oc7 primal Rayleigh tightening, a lower bound only for a max) and
+§5.7.2 (<C_file, X_hat> > 0 is unbounded only for a max) are external-MAX
+results.  A minimize problem (`maximize == 0`) is therefore refused by
+`arbsdp_certify_bracket`, `arbsdp_primal_lower_bound` and
+`arbsdp_verify_dual_infeasible` (INCONCLUSIVE / 0 + a stderr diagnostic), and
+`arbsdp_certify` returns INCONCLUSIVE [-inf, +inf] after the primal Farkas test.
+§5.7.1 is SENSE-INDEPENDENT (it refutes the feasible set; C never enters) and
+stays active for a minimize problem.  The assembly kernels `arbsdp_lower_bound`
+/ `arbsdp_upper_bound` are not guarded: for ANY y and an xbar bounding tr X on
+the feasible set, b^T y + sum_b min(0, dlo_b) xbar_b <= <C,X> <= b^T y +
+sum_b max(0, dhi_b) xbar_b for every feasible X, so they enclose the min and the
+max alike.  Real minimize certification is bead fjw.
+
 #### 5.7.4 MEASURED (firing iterate at prec=256, lambda_max bounds at prec=384; the de-risk probe)
 
 | golden | point-mode status | tau | kappa | cert verified | binding margin |

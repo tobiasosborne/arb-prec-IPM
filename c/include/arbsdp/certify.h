@@ -365,7 +365,8 @@ void arbsdp_upper_bound(arb_t ub, const arbsdp_problem *p, arb_srcptr y_ext,
  * scoped and cleared.  p, it non-NULL.  prec is the working precision.
  *
  * returns 1 and sets lb_out (a rigorous lower-bound ball) if applicable; returns
- * 0 (lb_out untouched) if not.
+ * 0 (lb_out untouched) if not.  MAXIMIZE GUARD (bead agc): returns 0 (+ a stderr
+ * diagnostic) when p->maximize == 0 -- a feasible point lower-bounds a MAX only.
  */
 int arbsdp_primal_lower_bound(arb_t lb_out, const arbsdp_problem *p,
                               const arbsdp_iterate *it, slong prec);
@@ -403,6 +404,10 @@ typedef enum {
  *
  * STATUS: ARBSDP_CERTIFY_OPTIMAL_BRACKET iff both lb, ub are finite; otherwise
  * ARBSDP_CERTIFY_INCONCLUSIVE (an infinite side or an unhealthy tau).
+ *
+ * MAXIMIZE GUARD (bead agc): p->maximize == 0 -> INCONCLUSIVE with [-inf, +inf]
+ * and a stderr diagnostic.  This bracket is the external-MAX bracket; minimize
+ * certification is bead arb-prec-IPM-fjw.
  *
  * Memory (CLAUDE.md rule 7): `lb`, `ub` are caller-init'd outputs; the scratch
  * y_ext vector and the assembled balls are scoped here and cleared.  p, it, ab
@@ -473,6 +478,8 @@ int arbsdp_verify_primal_infeasible(const arbsdp_problem *p,
  *
  * Returns 0 for non-coordinate / higher-rank recession rays (an honest
  * INCONCLUSIVE; see MATH_SPEC §5.7.2 SCOPE), never a false positive.
+ * MAXIMIZE GUARD (bead agc): returns 0 (+ a stderr diagnostic) when
+ * p->maximize == 0 -- <C,X_hat> > 0 is an unbounded ray only for a MAX.
  *
  * Reads it->X, it->prob (== p), it->nblocks.  prec is the certification precision.
  * p, it non-NULL.
@@ -496,6 +503,10 @@ int arbsdp_verify_dual_infeasible(const arbsdp_problem *p,
  *
  * lb, ub are caller-init'd; on ANY non-OPTIMAL_BRACKET return they are set to
  * -inf / +inf (an infeasibility verdict has no finite bracket -- CLAUDE.md rule 2).
+ *
+ * MAXIMIZE GUARD (bead agc): for p->maximize == 0 only the SENSE-INDEPENDENT
+ * primal Farkas test (§5.7.1) runs; otherwise INCONCLUSIVE with [-inf, +inf]
+ * and a stderr diagnostic (MATH_SPEC §5.7.3 "Objective-sense guard").
  *
  * Memory (CLAUDE.md rule 7): lb, ub caller-owned; scratch scoped here.  p, it, ab
  * non-NULL.  prec_c is the certification precision (final_prec + 128; MATH_SPEC §10).

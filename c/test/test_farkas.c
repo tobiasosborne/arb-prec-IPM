@@ -546,6 +546,219 @@ test_feasible_no_misfire_battery(void)
     }
 }
 
+/* ==========================================================================
+ * test_minimize_refused -- bead arb-prec-IPM-agc (REVIEW F3): the MAXIMIZE
+ * GUARD.  Layer 1 is derived for the EXTERNAL MAX problem only (MATH_SPEC §5.4,
+ * §5.5, §5.7.2; certify.h).  A minimize problem (p->maximize == 0) must NEVER
+ * receive a certifying status from an objective-sense-dependent entry point --
+ * a wrong-objective "rigorous" bracket / recession-ray verdict is the worst
+ * possible output (CLAUDE.md rule 2/5).  The real minimize certification is
+ * bead arb-prec-IPM-fjw; until it lands the honest answer is INCONCLUSIVE.
+ *
+ * (A) min_trace_diag13: C = diag(1,3), tr X = 1 (2x2 PSD).  min = 1 (X = E_11),
+ *     max = 3.  Solved as MINIMIZE.  Without the guard the oc7 primal Rayleigh
+ *     tightening (a FEASIBLE point's objective, a lower bound only for a MAX)
+ *     sets lb = <C, X_hat> >= 1 = the true min, so the "bracket" can EXCLUDE
+ *     the minimize optimum.  Asserted: certify_bracket and certify return
+ *     INCONCLUSIVE with [-inf, +inf]; primal_lower_bound returns 0.
+ *     CONTROL (the test is not vacuous): the same data with maximize = 1 gives
+ *     OPTIMAL_BRACKET containing 3.
+ * (B) min_free_coord: min X_22 s.t. X_11 = 1 (2x2 PSD; C = diag(0,1)).  BOUNDED
+ *     (opt 0) and dual-feasible (y = 0 gives C >= 0).  E_22 is a recession ray
+ *     with <C,E_22> = +1 > 0 -- an UNBOUNDED direction for a MAX, an IMPROVING-
+ *     AWAY direction for a MIN.  Without the guard verify_dual fires 1 and
+ *     certify reports DUAL_INFEASIBLE: a FALSE infeasibility certificate.
+ *     Asserted: verify_dual == 0, certify == INCONCLUSIVE.  CONTROL: the same
+ *     data with maximize = 1 (max X_22, genuinely unbounded) gives verify_dual 1.
+ * (C) SENSE-INDEPENDENCE of the primal Farkas test (§5.7.1): primal
+ *     infeasibility is a property of {X >= 0 : <A_i,X> = b_i} alone; the
+ *     certificate (sum y_i A_i <= 0, b^T y > 0) never reads C or the sense.  So
+ *     primal_infeasible_psd with maximize flipped to 0 must STILL verify, and
+ *     arbsdp_certify must still report PRIMAL_INFEASIBLE (the guard must not
+ *     over-refuse a valid sense-free theorem).
+ * ======================================================================== */
+static const char DATS_MIN_TRACE[] =
+    "* min_trace_diag13: opt C=diag(1,3) s.t. tr X = 1 (min 1, max 3).\n"
+    "1\n"
+    "1\n"
+    "2\n"
+    "1.0\n"
+    "0 1 1 1 1.0\n"
+    "0 1 2 2 3.0\n"
+    "1 1 1 1 1.0\n"
+    "1 1 2 2 1.0\n";
+
+static const char DATS_MIN_FREE_COORD[] =
+    "* min_free_coord: opt X_22 s.t. X_11 = 1 (min 0 bounded; max unbounded).\n"
+    "1\n"
+    "1\n"
+    "2\n"
+    "1.0\n"
+    "0 1 2 2 1.0\n"
+    "1 1 1 1 1.0\n";
+
+/* Load embedded `contents` into p with the given sense, solve at SOLVE_PREC. */
+static int
+load_and_solve_sense(arbsdp_problem *p, arbsdp_result *res, const char *tag,
+                     const char *contents, int maximize, char *path, size_t cap)
+{
+    arbsdp_solve_params sp;
+    arbsdp_problem_init(p);
+    if (!write_temp_dats(tag, contents, path, cap)) {
+        arbsdp_problem_clear(p);
+        return 0;
+    }
+    if (arbsdp_read_sdpa(p, path) != 0) {
+        fprintf(stderr, "FAIL: cannot parse embedded %s (%s)\n", tag, path);
+        arbsdp_problem_clear(p);
+        remove(path);
+        return 0;
+    }
+    p->maximize = maximize;               /* read_sdpa hardcodes 1 */
+    arbsdp_solve_default_params(&sp);
+    arbsdp_solve(res, p, SOLVE_PREC, &sp);   /* INITIALIZES res */
+    return 1;
+}
+
+static void
+test_minimize_refused(void)
+{
+    char path[256];
+
+    printf("\nMINIMIZE GUARD (bead agc: maximize=0 must NOT be certified):\n");
+
+    /* ---- (A) bracket path ------------------------------------------------ */
+    for (int maximize = 0; maximize <= 1; maximize++) {
+        arbsdp_problem p;
+        arbsdp_result  res;
+        const char *lbl = maximize ? "min_trace(CONTROL max)" : "min_trace(min)";
+
+        if (!load_and_solve_sense(&p, &res, "min_trace", DATS_MIN_TRACE, maximize,
+                                  path, sizeof path)) {
+            failures++;
+            continue;
+        }
+
+        arbsdp_apriori ab;
+        arb_t lb, ub, one, lbp, opt;
+        arbsdp_apriori_init(&ab, p.nblocks);
+        arb_init(lb); arb_init(ub); arb_init(one); arb_init(lbp); arb_init(opt);
+        arb_one(one);
+        arbsdp_apriori_set_xbar(&ab, 0, one);   /* tr X = 1 exactly */
+
+        arbsdp_certify_status csb =
+            arbsdp_certify_bracket(lb, ub, &p, &res.it, &ab, VERIFY_PREC);
+        {
+            char *slb = arb_get_str(lb, 20, 0);
+            char *sub = arb_get_str(ub, 20, 0);
+            printf("  %-24s solve=%s certify_bracket=%s lb=%s ub=%s\n", lbl,
+                   solve_status_name(res.status), certify_status_name(csb),
+                   slb, sub);
+            flint_free(slb);
+            flint_free(sub);
+        }
+        arbsdp_certify_status cs =
+            arbsdp_certify(lb, ub, &p, &res.it, &ab, VERIFY_PREC);
+        int plb = arbsdp_primal_lower_bound(lbp, &p, &res.it, VERIFY_PREC);
+
+        if (!maximize) {
+            expect_int((int) res.status, (int) ARBSDP_SOLVE_OPTIMAL, lbl,
+                       "solve.status");
+            expect_int((int) csb, (int) ARBSDP_CERTIFY_INCONCLUSIVE, lbl,
+                       "certify_bracket");
+            expect_int((int) cs, (int) ARBSDP_CERTIFY_INCONCLUSIVE, lbl,
+                       "certify.status");
+            expect_int(arb_is_finite(lb) || arb_is_finite(ub), 0, lbl,
+                       "lb/ub finite");
+            expect_int(plb, 0, lbl, "primal_lower_bnd");
+        } else {
+            /* CONTROL: max opt = 3 must be bracketed (the guard is sense-gated,
+             * not a blanket refusal). */
+            arb_set_si(opt, 3);
+            expect_int((int) cs, (int) ARBSDP_CERTIFY_OPTIMAL_BRACKET, lbl,
+                       "certify.status");
+            expect_int(arb_le(lb, opt) && arb_le(opt, ub), 1, lbl,
+                       "lb<=3<=ub");
+            expect_int(plb, 1, lbl, "primal_lower_bnd");
+        }
+
+        arb_clear(lb); arb_clear(ub); arb_clear(one); arb_clear(lbp);
+        arb_clear(opt);
+        arbsdp_apriori_clear(&ab);
+        arbsdp_result_clear(&res);
+        arbsdp_problem_clear(&p);
+        remove(path);
+    }
+
+    /* ---- (B) dual-infeasibility (recession-ray) path -------------------- */
+    {
+        arbsdp_problem p;
+        arbsdp_result  res;
+        const char *lbl = "min_free_coord";
+
+        if (load_and_solve_sense(&p, &res, "min_free_coord", DATS_MIN_FREE_COORD,
+                                 0, path, sizeof path)) {
+            arbsdp_apriori ab;
+            arb_t lb, ub;
+            arbsdp_apriori_init(&ab, p.nblocks);
+            arb_init(lb); arb_init(ub);
+
+            int vd = arbsdp_verify_dual_infeasible(&p, &res.it, VERIFY_PREC);
+            arbsdp_certify_status cs =
+                arbsdp_certify(lb, ub, &p, &res.it, &ab, VERIFY_PREC);
+            printf("  %-24s solve=%s vd=%d certify=%s\n", lbl,
+                   solve_status_name(res.status), vd, certify_status_name(cs));
+            expect_int(vd, 0, lbl, "verify_dual(min)");
+            expect_int((int) cs, (int) ARBSDP_CERTIFY_INCONCLUSIVE, lbl,
+                       "certify.status");
+
+            /* CONTROL: as a MAX the same data IS unbounded (E_22 ray); the
+             * verifier is data-only, so flip the flag on the same iterate. */
+            p.maximize = 1;
+            vd = arbsdp_verify_dual_infeasible(&p, &res.it, VERIFY_PREC);
+            expect_int(vd, 1, "min_free_coord(CONTROL)", "verify_dual(max)");
+
+            arb_clear(lb); arb_clear(ub);
+            arbsdp_apriori_clear(&ab);
+            arbsdp_result_clear(&res);
+            arbsdp_problem_clear(&p);
+            remove(path);
+        } else {
+            failures++;
+        }
+    }
+
+    /* ---- (C) primal Farkas is sense-independent ------------------------- */
+    {
+        arbsdp_problem p;
+        arbsdp_result  res;
+        const char *lbl = "primal_infeasible_psd(min)";
+
+        if (load_and_solve(&p, &res, "primal_infeasible_psd")) {
+            arbsdp_apriori ab;
+            arb_t lb, ub;
+            arbsdp_apriori_init(&ab, p.nblocks);
+            arb_init(lb); arb_init(ub);
+
+            p.maximize = 0;   /* same feasible set, same Farkas ray */
+            int vp = arbsdp_verify_primal_infeasible(&p, &res.it, VERIFY_PREC);
+            arbsdp_certify_status cs =
+                arbsdp_certify(lb, ub, &p, &res.it, &ab, VERIFY_PREC);
+            printf("  %-24s vp=%d certify=%s\n", lbl, vp, certify_status_name(cs));
+            expect_int(vp, 1, lbl, "verify_primal");
+            expect_int((int) cs, (int) ARBSDP_CERTIFY_PRIMAL_INFEASIBLE, lbl,
+                       "certify.status");
+
+            arb_clear(lb); arb_clear(ub);
+            arbsdp_apriori_clear(&ab);
+            arbsdp_result_clear(&res);
+            arbsdp_problem_clear(&p);
+        } else {
+            failures++;
+        }
+    }
+}
+
 int
 main(void)
 {
@@ -554,6 +767,7 @@ main(void)
     test_farkas_table();
     test_feasible_no_misfire();
     test_feasible_no_misfire_battery();
+    test_minimize_refused();
 
     if (failures == 0) {
         printf("\nAll test_farkas checks passed.\n");
