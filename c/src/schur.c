@@ -105,6 +105,65 @@ arbsdp_schur_assemble(arb_mat_t M, const arbsdp_problem *p,
             arb_set(arb_mat_entry(M, k, i), arb_mat_entry(M, i, k));
 }
 
+/* Cached variant (bead 6b6): the loop above verbatim, with A_k^b / A_i^b read
+ * from the per-(solve, prec) cache instead of re-parsed -- bit-identical M. */
+void
+arbsdp_schur_assemble_pc(arb_mat_t M, const arbsdp_pcache *pc,
+                         const arb_mat_t *W_blocks, slong prec)
+{
+    int m, nb;
+
+    assert(M != NULL);
+    assert(pc != NULL);
+    assert(W_blocks != NULL);
+    assert(pc->prec == prec);
+
+    m = pc->m;
+    nb = pc->nblocks;
+    assert(arb_mat_nrows(M) == m);
+    assert(arb_mat_ncols(M) == m);
+
+    arb_mat_zero(M);
+    if (m == 0)
+        return;
+
+    for (int b = 0; b < nb; b++) {
+        slong n = block_side(pc->prob, b);
+        const arb_mat_t *Wb = &W_blocks[b];
+        arb_mat_t WA, WAW;
+        arb_t v;
+
+        assert(arb_mat_nrows(*Wb) == n);
+        assert(arb_mat_ncols(*Wb) == n);
+
+        arb_mat_init(WA, n, n);
+        arb_mat_init(WAW, n, n);
+        arb_init(v);
+
+        for (int k = 0; k < m; k++) {
+            /* A_k^b (matno = k+1), then WAW = sym(W A_k W). */
+            arb_mat_mul(WA, *Wb, arbsdp_pcache_A(pc, k, b), prec);
+            arb_mat_mul(WAW, WA, *Wb, prec);
+            arbsdp_symmetrize(WAW, prec);
+
+            /* upper triangle i <= k: M_ik += <A_i^b, WAW>. */
+            for (int i = 0; i <= k; i++) {
+                arbsdp_frob_inner(v, arbsdp_pcache_A(pc, i, b), WAW, prec);
+                arb_add(arb_mat_entry(M, i, k), arb_mat_entry(M, i, k), v, prec);
+            }
+        }
+
+        arb_mat_clear(WA);
+        arb_mat_clear(WAW);
+        arb_clear(v);
+    }
+
+    /* mirror upper -> lower (M symmetric). */
+    for (int k = 0; k < m; k++)
+        for (int i = 0; i < k; i++)
+            arb_set(arb_mat_entry(M, k, i), arb_mat_entry(M, i, k));
+}
+
 int
 arbsdp_schur_factor(arb_mat_t L, const arb_mat_t M, slong prec)
 {

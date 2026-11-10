@@ -488,6 +488,21 @@ done:
  * Materialization
  * ---------------------------------------------------------------------- */
 
+/* Parse-count instrument (problem.h; bead arb-prec-IPM-6b6).  Thread-local so a
+ * multi-threaded host (Julia) cannot race on it; diagnostics only. */
+static _Thread_local ulong parse_count_mat = 0;
+static _Thread_local ulong parse_count_rhs = 0;
+
+ulong arbsdp_parse_count_mat(void) { return parse_count_mat; }
+ulong arbsdp_parse_count_rhs(void) { return parse_count_rhs; }
+
+void
+arbsdp_parse_count_reset(void)
+{
+    parse_count_mat = 0;
+    parse_count_rhs = 0;
+}
+
 void
 arbsdp_problem_block_mat(arb_mat_t out, const arbsdp_problem *p, int matno,
                          int block, slong prec)
@@ -517,6 +532,7 @@ arbsdp_problem_block_mat(arb_mat_t out, const arbsdp_problem *p, int matno,
          * data.  Fail loud UNCONDITIONALLY (bead arb-prec-IPM-jhw): this was an
          * assert, which vanishes under NDEBUG and would let a garbage entry
          * flow silently into the solve and the certificate (CLAUDE.md rule 5). */
+        parse_count_mat++;
         if (arb_set_str(v, mb->entries[e].value, prec) != 0) {
             fprintf(stderr, "arbsdp: block_mat: entry (matno %d, block %d, "
                     "%d, %d) failed to parse: \"%s\"\n", matno, block + 1,
@@ -542,6 +558,7 @@ arbsdp_problem_b(arb_t out, const arbsdp_problem *p, int i, slong prec)
 {
     assert(p != NULL);
     assert(i >= 0 && i < p->m);
+    parse_count_rhs++;
     return arb_set_str(out, p->b[i], prec) ? 1 : 0;
 }
 

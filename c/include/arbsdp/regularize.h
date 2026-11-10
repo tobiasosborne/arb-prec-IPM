@@ -89,6 +89,7 @@
 #include <flint/arb_mat.h>
 
 #include "arbsdp/problem.h"
+#include "arbsdp/pcache.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -173,6 +174,18 @@ void arbsdp_regstate_clear(arbsdp_regstate *rs);
 int arbsdp_factor_with_reg(arb_mat_t L, const arb_mat_t M, arbsdp_regstate *rs,
                            const arbsdp_problem *p, slong prec,
                            int *attempts_out);
+
+/*
+ * arbsdp_factor_with_reg_pc -- identical contract, with the diagnose input read
+ * from a materialization cache (pcache.h; bead 6b6).  The diagnose bit depends
+ * only on the constant data at `prec`, so it is computed on the first call and
+ * memoized in pc->primal_degen (hence `pc` is non-const); arbsdp_solve's cache
+ * lives for one solve, so the memo does too.  pc->prec must equal `prec`
+ * (asserted).  arbsdp_factor_with_reg above is this function on a scoped
+ * temporary cache.
+ */
+int arbsdp_factor_with_reg_pc(arb_mat_t L, const arb_mat_t M, arbsdp_regstate *rs,
+                              arbsdp_pcache *pc, slong prec, int *attempts_out);
 
 #ifdef __cplusplus
 }

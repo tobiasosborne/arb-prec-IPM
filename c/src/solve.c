@@ -339,6 +339,12 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
     int                iter = 0;
 
     arb_t mu_old, thresh;                  /* stall detection scratch (cached)  */
+    /* Per-(solve, prec) constraint-data cache (pcache.h, bead 6b6): A_i^b and b
+     * parsed ONCE here, lent to the working iterate for the whole loop, and
+     * detached + freed at teardown (the loop has no early return). */
+    arbsdp_pcache      pc;
+    arbsdp_pcache_init(&pc, p, prec);
+    it->pc = &pc;
     arbsdp_iterate_init(&best, p, prec);
     arbsdp_regstate_init(&rs, prec);
     arbsdp_direction_init(&d, p);
@@ -547,6 +553,8 @@ arbsdp_solve(arbsdp_result *res, const arbsdp_problem *p, slong prec,
     arbsdp_direction_clear(&d);
     arbsdp_regstate_clear(&rs);
     arbsdp_iterate_clear(&best);
+    it->pc = NULL;            /* res->it outlives the cache: never dangle */
+    arbsdp_pcache_clear(&pc);
 
     return status;
 }

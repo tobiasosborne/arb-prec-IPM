@@ -37,6 +37,7 @@ arbsdp_iterate_init(arbsdp_iterate *it, const arbsdp_problem *p, slong prec)
     assert(p->nblocks >= 0);
 
     it->prob = p;
+    it->pc = NULL;   /* borrowed cache, attached by arbsdp_solve (bead 6b6) */
     it->m = p->m;
     it->nblocks = p->nblocks;
 
@@ -120,6 +121,7 @@ arbsdp_iterate_clear(arbsdp_iterate *it)
     arb_clear(it->gap_inf);
 
     it->prob = NULL;
+    it->pc = NULL;   /* borrowed: never freed here */
     it->X = NULL;
     it->S = NULL;
     it->R_d = NULL;
@@ -192,6 +194,59 @@ arbsdp_apply_At(arb_mat_t *out_blocks, const arbsdp_problem *p, arb_srcptr y,
     }
 }
 
+/* Cached variants (bead 6b6): identical loop order and arithmetic to
+ * arbsdp_apply_A / arbsdp_apply_At above, with A_i^b read from the cache instead
+ * of re-materialized -- bit-identical results (test_pcache). */
+void
+arbsdp_apply_A_pc(arb_ptr out, const arbsdp_pcache *pc, const arb_mat_t *X_blocks,
+                  slong prec)
+{
+    assert(out != NULL);
+    assert(pc != NULL);
+    assert(X_blocks != NULL);
+    assert(pc->prec == prec);
+
+    arb_t acc, Ai_dot;
+    arb_init(acc);
+    arb_init(Ai_dot);
+
+    for (int i = 0; i < pc->m; i++) {
+        arb_zero(acc);
+        for (int b = 0; b < pc->nblocks; b++) {
+            const arb_mat_struct *Ai = arbsdp_pcache_A(pc, i, b);
+            assert(arb_mat_nrows(X_blocks[b]) == arb_mat_nrows(Ai));
+            assert(arb_mat_ncols(X_blocks[b]) == arb_mat_ncols(Ai));
+            arbsdp_frob_inner(Ai_dot, Ai, X_blocks[b], prec);
+            arb_add(acc, acc, Ai_dot, prec);
+        }
+        arb_set(&out[i], acc);
+    }
+
+    arb_clear(acc);
+    arb_clear(Ai_dot);
+}
+
+void
+arbsdp_apply_At_pc(arb_mat_t *out_blocks, const arbsdp_pcache *pc, arb_srcptr y,
+                   slong prec)
+{
+    assert(out_blocks != NULL);
+    assert(pc != NULL);
+    assert(y != NULL);
+    assert(pc->prec == prec);
+
+    for (int b = 0; b < pc->nblocks; b++) {
+        arb_mat_zero(out_blocks[b]);
+        for (int i = 0; i < pc->m; i++) {
+            const arb_mat_struct *Ai = arbsdp_pcache_A(pc, i, b);
+            assert(arb_mat_nrows(out_blocks[b]) == arb_mat_nrows(Ai));
+            assert(arb_mat_ncols(out_blocks[b]) == arb_mat_ncols(Ai));
+            /* out_blocks[b] += y_i * Ai */
+            arb_mat_scalar_addmul_arb(out_blocks[b], Ai, &y[i], prec);
+        }
+    }
+}
+
 /* max-abs entry of a vector (point-mode; midpoints).  No prec: arb_abs and the
  * comparison are exact (sign/copy operations). */
 static void
@@ -229,24 +284,35 @@ void
 arbsdp_iterate_residuals(arbsdp_iterate *it, slong prec)
 {
     assert(it != NULL);
-    const arbsdp_problem *p = it->prob;
     const int m = it->m, nb = it->nblocks;
+
+    /* Constraint data: the solve's per-(solve, prec) cache when attached, else a
+     * scoped temporary (pcache.h; bead 6b6).  Either way the values are exactly
+     * the on-demand materializations at `prec`. */
+    arbsdp_pcache pc_tmp;
+    const arbsdp_pcache *pc = it->pc;
+    if (pc == NULL) {
+        arbsdp_pcache_init(&pc_tmp, it->prob, prec);
+        pc = &pc_tmp;
+    }
+    assert(pc->prob == it->prob);
+    assert(pc->prec == prec);
 
     arb_t tmp, bi;
     arb_init(tmp);
     arb_init(bi);
 
     /* --- r_p_i = sum_b <A_i^b, X^b> - b_i*tau  (HsdeNtSdpSolver.ts:375-379) --- */
-    arbsdp_apply_A(it->r_p, p, (const arb_mat_t *) it->X, prec);
+    arbsdp_apply_A_pc(it->r_p, pc, (const arb_mat_t *) it->X, prec);
     for (int i = 0; i < m; i++) {
-        arbsdp_problem_b(bi, p, i, prec);
+        arb_set(bi, pc->b + i);
         arb_mul(tmp, bi, it->tau, prec);            /* b_i * tau */
         arb_sub(&it->r_p[i], &it->r_p[i], tmp, prec);
     }
 
     /* --- R_d^b = sum_i y_i A_i^b + S^b - C_int^b*tau (HsdeNtSdpSolver.ts:380-390)
      * Build sum_i y_i A_i^b = (A^T y)^b first, then add S^b, subtract C_int^b*tau. */
-    arbsdp_apply_At(it->R_d, p, it->y, prec);
+    arbsdp_apply_At_pc(it->R_d, pc, it->y, prec);
     for (int b = 0; b < nb; b++) {
         arb_mat_add(it->R_d[b], it->R_d[b], it->S[b], prec);     /* + S^b */
         /* - C_int^b * tau : addmul with scalar -tau */
@@ -262,7 +328,7 @@ arbsdp_iterate_residuals(arbsdp_iterate *it, slong prec)
     }
     arb_zero(it->dObj);
     for (int i = 0; i < m; i++) {
-        arbsdp_problem_b(bi, p, i, prec);
+        arb_set(bi, pc->b + i);
         arb_mul(tmp, bi, &it->y[i], prec);
         arb_add(it->dObj, it->dObj, tmp, prec);
     }
@@ -294,4 +360,6 @@ arbsdp_iterate_residuals(arbsdp_iterate *it, slong prec)
 
     arb_clear(tmp);
     arb_clear(bi);
+    if (pc == &pc_tmp)
+        arbsdp_pcache_clear(&pc_tmp);
 }

@@ -11,11 +11,11 @@
  *     combine); :820-827 step + safeguard; :1168-1175 clip / clipStep.
  *   - PsdCone.ts:186-202 psdMaxStep; HsdeStepLength.ts:48-64 tauKappaMaxStep.
  *
- * REUSE (no duplication): arbsdp_schur_assemble / arbsdp_schur_solve (schur.h),
- * arbsdp_factor_with_reg (regularize.h), arbsdp_apply_At (iterate.h),
+ * REUSE (no duplication): arbsdp_schur_assemble_pc / arbsdp_schur_solve (schur.h),
+ * arbsdp_factor_with_reg_pc (regularize.h), arbsdp_apply_At (iterate.h),
  * arbsdp_psd_invsqrt / arbsdp_eigh (linalg.h), arbsdp_frob_inner /
- * arbsdp_symmetrize (svec.h), arbsdp_problem_block_mat / arbsdp_problem_b
- * (problem.h).  The W*A*W Schur assembly is reused from schur.h; only the b14
+ * arbsdp_symmetrize (svec.h), the per-(solve, prec) data cache A_i^b / b_i
+ * (pcache.h, bead 6b6; never re-parsed per iteration).  The W*A*W Schur assembly is reused from schur.h; only the b14
  * caches (W*C*W, W*r_d*W) and the direction recovery live here.
  *
  * Arb memory discipline (CLAUDE.md rule 7): matching init/clear everywhere; only
@@ -53,19 +53,15 @@ block_side(const arbsdp_problem *p, int b)
  * n x n arb_mat (n = block_side(p,b)); it is zeroed then accumulated.
  */
 static void
-apply_At_block(arb_mat_t out, const arbsdp_problem *p, int b,
+apply_At_block(arb_mat_t out, const arbsdp_pcache *pc, int b,
                const arb_mat_t dy, slong prec)
 {
-    slong n = block_side(p, b);
-    arb_mat_t Ai;
+    slong n = block_side(pc->prob, b);
     assert(arb_mat_nrows(out) == n && arb_mat_ncols(out) == n);
     arb_mat_zero(out);
-    arb_mat_init(Ai, n, n);
-    for (int i = 0; i < p->m; i++) {
-        arbsdp_problem_block_mat(Ai, p, i + 1, b, prec);   /* A_{i+1}^b */
-        arb_mat_scalar_addmul_arb(out, Ai, arb_mat_entry(dy, i, 0), prec);
-    }
-    arb_mat_clear(Ai);
+    for (int i = 0; i < pc->m; i++)   /* A_{i+1}^b from the cache (bead 6b6) */
+        arb_mat_scalar_addmul_arb(out, arbsdp_pcache_A(pc, i, b),
+                                  arb_mat_entry(dy, i, 0), prec);
 }
 
 /* ========================================================================= *
@@ -562,6 +558,18 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
 
     assert(d->m == m && d->nblocks == nb);
 
+    /* Constraint data: the solve's per-(solve, prec) cache when attached, else a
+     * scoped temporary freed at cleanup (pcache.h; bead 6b6).  Either way A_i^b
+     * and b_i are exactly the on-demand materializations at `prec`. */
+    arbsdp_pcache pc_tmp;
+    arbsdp_pcache *pc = it->pc;
+    if (pc == NULL) {
+        arbsdp_pcache_init(&pc_tmp, p, prec);
+        pc = &pc_tmp;
+    }
+    assert(pc->prob == p);
+    assert(pc->prec == prec);
+
     /* --- per-block caches and NT G-factors ------------------------------- */
     arb_mat_t *WCW  = flint_malloc((size_t) nb * sizeof *WCW);   /* W C_int W   */
     arb_mat_t *WrdW = flint_malloc((size_t) nb * sizeof *WrdW);  /* W r_d W     */
@@ -644,11 +652,11 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
      * Schur M = sum_b <A_i, W A_k W>  (schur.h), factor ONCE with 3-way reg.
      * factor-once / solve-many: the SAME L serves data + affine + combined.
      * ------------------------------------------------------------------- */
-    arbsdp_schur_assemble(M, p, W_blocks, prec);
+    arbsdp_schur_assemble_pc(M, pc, W_blocks, prec);
     {
         int attempts = 0;
         d->factor_calls = 1;                 /* the ONE factorization invocation */
-        if (!arbsdp_factor_with_reg(L, M, rs, p, prec, &attempts)) {
+        if (!arbsdp_factor_with_reg_pc(L, M, rs, pc, prec, &attempts)) {
             d->factor_attempts = attempts;
             ok = 0;
             goto cleanup;
@@ -661,15 +669,10 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
      * dX1 = -W dS1 W  (:574-604).
      * ------------------------------------------------------------------- */
     for (int i = 0; i < m; i++) {
-        arbsdp_problem_b(s, p, i, prec);     /* b_i */
+        arb_set(s, pc->b + i);               /* b_i */
         for (int b = 0; b < nb; b++) {
-            slong n = block_side(p, b);
-            arb_mat_t Ai;
-            arb_mat_init(Ai, n, n);
-            arbsdp_problem_block_mat(Ai, p, i + 1, b, prec);
-            arbsdp_frob_inner(v, Ai, WCW[b], prec);
+            arbsdp_frob_inner(v, arbsdp_pcache_A(pc, i, b), WCW[b], prec);
             arb_add(s, s, v, prec);
-            arb_mat_clear(Ai);
         }
         arb_set(arb_mat_entry(rhs, i, 0), s);
     }
@@ -682,7 +685,7 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
         arb_mat_init(AtDy, n, n);
         arb_mat_init(tmpn, n, n);
         /* dS1 = C_int - sum_k dy1_k A_k = C_int - (A^T dy1)^b. */
-        apply_At_block(AtDy, p, b, dy1, prec);
+        apply_At_block(AtDy, pc, b, dy1, prec);
         arb_mat_sub(dS1[b], it->C_int[b], AtDy, prec);
         arbsdp_symmetrize(dS1[b], prec);
         /* dX1 = -W dS1 W. */
@@ -706,7 +709,7 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
     }
     arb_zero(bdy1);
     for (int i = 0; i < m; i++) {
-        arbsdp_problem_b(v, p, i, prec);
+        arb_set(v, pc->b + i);
         arb_mul(v, v, arb_mat_entry(dy1, i, 0), prec);
         arb_add(bdy1, bdy1, v, prec);
     }
@@ -722,15 +725,11 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
     for (int i = 0; i < m; i++) {
         arb_neg(s, &it->r_p[i]);             /* -r_p_i */
         for (int b = 0; b < nb; b++) {
-            slong n = block_side(p, b);
-            arb_mat_t Ai;
-            arb_mat_init(Ai, n, n);
-            arbsdp_problem_block_mat(Ai, p, i + 1, b, prec);
+            const arb_mat_struct *Ai = arbsdp_pcache_A(pc, i, b);
             arbsdp_frob_inner(v, Ai, it->X[b], prec);     /* + <A_i, X> */
             arb_add(s, s, v, prec);
             arbsdp_frob_inner(v, Ai, WrdW[b], prec);      /* - <A_i, W r_d W> */
             arb_sub(s, s, v, prec);
-            arb_mat_clear(Ai);
         }
         arb_set(arb_mat_entry(rhs, i, 0), s);
     }
@@ -743,7 +742,7 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
         arb_mat_init(AtDy, n, n);
         arb_mat_init(tmpn, n, n);
         arb_mat_init(tmpn2, n, n);
-        apply_At_block(AtDy, p, b, dy2, prec);
+        apply_At_block(AtDy, pc, b, dy2, prec);
         /* dS2 = -(A^T dy2) - r_d. */
         arb_mat_neg(dS2[b], AtDy);
         arb_mat_sub(dS2[b], dS2[b], it->R_d[b], prec);
@@ -769,7 +768,7 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
     }
     arb_zero(bdy2);
     for (int i = 0; i < m; i++) {
-        arbsdp_problem_b(v, p, i, prec);
+        arb_set(v, pc->b + i);
         arb_mul(v, v, arb_mat_entry(dy2, i, 0), prec);
         arb_add(bdy2, bdy2, v, prec);
     }
@@ -886,16 +885,12 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
         arb_mul(s, eta, &it->r_p[i], prec);  /* eta*r_p_i */
         arb_neg(s, s);                        /* -eta*r_p_i */
         for (int b = 0; b < nb; b++) {
-            slong n = block_side(p, b);
-            arb_mat_t Ai;
-            arb_mat_init(Ai, n, n);
-            arbsdp_problem_block_mat(Ai, p, i + 1, b, prec);
+            const arb_mat_struct *Ai = arbsdp_pcache_A(pc, i, b);
             arbsdp_frob_inner(v, Ai, ExC[b], prec);     /* - <A_i, E_x_comb> */
             arb_sub(s, s, v, prec);
             arbsdp_frob_inner(v, Ai, WrdW[b], prec);    /* - eta*<A_i, W r_d W> */
             arb_mul(v, v, eta, prec);
             arb_sub(s, s, v, prec);
-            arb_mat_clear(Ai);
         }
         arb_set(arb_mat_entry(rhs, i, 0), s);
     }
@@ -910,7 +905,7 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
         arb_mat_init(tmpn, n, n);
         arb_mat_init(tmpn2, n, n);
         arb_init(neta);
-        apply_At_block(AtDy, p, b, dy2, prec);
+        apply_At_block(AtDy, pc, b, dy2, prec);
         /* dS2 = -(A^T dy2) - eta*r_d. */
         arb_mat_neg(dS2[b], AtDy);
         arb_neg(neta, eta);
@@ -935,7 +930,7 @@ arbsdp_direction_compute(arbsdp_direction *d, const arbsdp_iterate *it,
     }
     arb_zero(bdy2);
     for (int i = 0; i < m; i++) {
-        arbsdp_problem_b(v, p, i, prec);
+        arb_set(v, pc->b + i);
         arb_mul(v, v, arb_mat_entry(dy2, i, 0), prec);
         arb_add(bdy2, bdy2, v, prec);
     }
@@ -1022,6 +1017,8 @@ cleanup:
     arb_clear(dtau_aff); arb_clear(dkap_aff); arb_clear(eta); arb_clear(sigma_mu);
     arb_clear(Etau); arb_clear(dtau_num);
     arb_clear(alpha_raw); arb_clear(big);
+    if (pc == &pc_tmp)
+        arbsdp_pcache_clear(&pc_tmp);   /* every exit path passes here */
 
     return ok;
 }

@@ -82,6 +82,7 @@
 #include <flint/arb_mat.h>
 
 #include "arbsdp/problem.h"
+#include "arbsdp/pcache.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,6 +94,13 @@ extern "C" {
  */
 typedef struct {
     const arbsdp_problem *prob;   /* borrowed; not owned                       */
+    /* Borrowed constraint-data cache (pcache.h, bead 6b6), or NULL.  When set,
+     * arbsdp_iterate_residuals / arbsdp_direction_compute read A_i^b and b from
+     * it (it must be built from `prob` at the working prec); when NULL they
+     * build a scoped temporary per call.  arbsdp_solve attaches its per-solve
+     * cache and detaches it before freeing it.  init sets NULL; clear never
+     * frees it.  Non-const: regularize.c memoizes its diagnose in it. */
+    arbsdp_pcache *pc;
     int        m;                 /* number of constraints                     */
     int        nblocks;           /* number of blocks                          */
     slong     *block_n;           /* length nblocks: side |block_sizes[b]|     */
@@ -172,6 +180,19 @@ void arbsdp_apply_A(arb_ptr out, const arbsdp_problem *p,
  */
 void arbsdp_apply_At(arb_mat_t *out_blocks, const arbsdp_problem *p,
                      arb_srcptr y, slong prec);
+
+/*
+ * arbsdp_apply_A_pc / arbsdp_apply_At_pc -- the same operators reading A_i^b
+ * from a materialization cache (pcache.h; bead 6b6) instead of re-parsing it.
+ * Same loop order and arithmetic as arbsdp_apply_A / arbsdp_apply_At, hence
+ * bit-identical results (test_pcache).  pc->prec must equal `prec` (asserted).
+ * The p-based versions above are kept as the on-demand reference and for
+ * Layer 1 (certify.c materializes its own balls at the certification prec).
+ */
+void arbsdp_apply_A_pc(arb_ptr out, const arbsdp_pcache *pc,
+                       const arb_mat_t *X_blocks, slong prec);
+void arbsdp_apply_At_pc(arb_mat_t *out_blocks, const arbsdp_pcache *pc,
+                        arb_srcptr y, slong prec);
 
 /* -------------------------------------------------------------------------
  * Residuals + objectives + mu (the 3-row HSDE residuals)

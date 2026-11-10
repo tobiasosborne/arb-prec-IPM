@@ -442,3 +442,24 @@ target_compile_definitions(test_cli
 add_dependencies(test_cli arbsdp_cli)
 
 add_test(NAME test_cli COMMAND test_cli)
+
+# The per-(solve, prec) constraint-data materialization cache (bead
+# arb-prec-IPM-6b6): exact (bit-identical) cached-vs-uncached kernel comparisons
+# on multi-block goldens + the parse-count-independent-of-iterations property.
+add_executable(test_pcache test/test_pcache.c)
+
+target_include_directories(test_pcache
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${FLINT_INCLUDE_DIRS}
+)
+
+target_compile_definitions(test_pcache
+    PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
+        FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+)
+
+target_link_libraries(test_pcache PRIVATE arbsdp)
+
+add_test(NAME test_pcache COMMAND test_pcache)

@@ -66,6 +66,7 @@
 #include <flint/arb_mat.h>
 
 #include "arbsdp/problem.h"
+#include "arbsdp/pcache.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -94,6 +95,16 @@ extern "C" {
  */
 void arbsdp_schur_assemble(arb_mat_t M, const arbsdp_problem *p,
                            const arb_mat_t *W_blocks, slong prec);
+
+/*
+ * arbsdp_schur_assemble_pc -- the same assembly reading A_i^b from a
+ * materialization cache (pcache.h; bead 6b6) instead of re-parsing A_k^b and
+ * A_i^b inside the k / i<=k loops (O(m^2 nb) decimal parses per call before the
+ * cache).  Same loop order and arithmetic as arbsdp_schur_assemble, hence a
+ * bit-identical M (test_pcache).  pc->prec must equal `prec` (asserted).
+ */
+void arbsdp_schur_assemble_pc(arb_mat_t M, const arbsdp_pcache *pc,
+                              const arb_mat_t *W_blocks, slong prec);
 
 /*
  * arbsdp_schur_factor -- L <- Cholesky factor of M, via arb_mat_cho.

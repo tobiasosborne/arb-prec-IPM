@@ -29,8 +29,11 @@
  *   - they are lossless: 65 digits round-trip exactly, no premature rounding;
  *   - `arb_set_str` already yields a correctly-rounded enclosure of the exact
  *     decimal at the requested prec, so rigor (a true ball enclosure) is free.
- * The cost is a re-parse of each materialized entry, which is negligible for the
- * small dense problems in scope (PRD v1) and happens O(few) times per solve.
+ * The cost is a re-parse of each materialized entry.  Layer 0 must therefore not
+ * materialize A_i^b / b inside its per-iteration loops: it parses them ONCE per
+ * (solve, prec) into an arbsdp_pcache (pcache.h; bead 6b6 -- before that cache
+ * the loop did O(m^2 nb) parses per iteration).  C is materialized a constant
+ * number of times per solve (the iterates' C_int, the starting point).
  *
  * ==========================================================================
  * THE .dat-s OFF-DIAGONAL "2v" CONVENTION (critical; see golden/README.md)
@@ -190,6 +193,26 @@ void arbsdp_problem_block_mat(arb_mat_t out, const arbsdp_problem *p,
  * problem produced by arbsdp_read_sdpa, which validates b at parse time).
  */
 int arbsdp_problem_b(arb_t out, const arbsdp_problem *p, int i, slong prec);
+
+/* -------------------------------------------------------------------------
+ * Parse-count instrument (bead arb-prec-IPM-6b6; diagnostics + tests only)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * arbsdp_parse_count_mat / arbsdp_parse_count_rhs -- the number of decimal
+ * parses (arb_set_str calls) performed by arbsdp_problem_block_mat (one per
+ * stored matrix entry materialized) and by arbsdp_problem_b (one per call) in
+ * the CALLING THREAD since the last arbsdp_parse_count_reset.  The counters are
+ * _Thread_local, so concurrent solves on different threads do not race.
+ *
+ * Purpose: make the materialization cost observable.  The Layer-0 solve parses
+ * every A_i^b entry ONCE per (solve, prec) into an arbsdp_pcache (pcache.h);
+ * test_pcache asserts the matrix-parse count of a solve is independent of the
+ * iteration count.  The counters steer nothing.
+ */
+ulong arbsdp_parse_count_mat(void);
+ulong arbsdp_parse_count_rhs(void);
+void  arbsdp_parse_count_reset(void);
 
 #ifdef __cplusplus
 }

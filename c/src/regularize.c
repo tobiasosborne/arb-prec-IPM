@@ -10,8 +10,8 @@
  *   - solver-ipm/src/solver/Defaults.ts:40-46 (caps, bumps, initialJitter).
  *   - docs/FLINT_NOTES.md: arb_mat_cho returns 1 iff PROVEN PD.
  *
- * REUSE (no duplication): arbsdp_problem_block_mat (problem.h) to materialize
- * each A_i^b for the diagnose row norms; arb_mat_cho (FLINT) for the factor;
+ * REUSE (no duplication): the per-(solve, prec) cache (pcache.h, bead 6b6) for
+ * each A_i^b of the diagnose row norms; arb_mat_cho (FLINT) for the factor;
  * arb_mat_frobenius_norm (FLINT) for the per-block Frobenius norm.  The Schur M
  * is supplied by the caller (arbsdp_schur_assemble, schur.h) -- not rebuilt here.
  */
@@ -85,14 +85,6 @@ arbsdp_regstate_clear(arbsdp_regstate *rs)
     rs->bumps_p = rs->bumps_d = rs->bumps_g = rs->refactors = 0;
 }
 
-/* side length of block b (|block_sizes[b]|; negative = diagonal/LP block). */
-static slong
-block_side(const arbsdp_problem *p, int b)
-{
-    int s = p->block_sizes[b];
-    return (s < 0) ? -(slong) s : (slong) s;
-}
-
 /*
  * has_primal_degenerate_row -- the row-agnostic port of makeSdpDiagnose
  * (Regularization.ts:174-192).  Returns 1 iff SOME constraint i has Frobenius
@@ -107,10 +99,10 @@ block_side(const arbsdp_problem *p, int b)
  * bump, no rigor is claimed.
  */
 static int
-has_primal_degenerate_row(const arbsdp_problem *p, slong prec)
+has_primal_degenerate_row(const arbsdp_pcache *pc, slong prec)
 {
-    int m = p->m;
-    int nb = p->nblocks;
+    int m = pc->m;
+    int nb = pc->nblocks;
     arb_ptr row_norm;        /* rowNorm_i for i = 0..m-1 */
     arb_t global, thresh, sq, fn, floor_a;
     int found;
@@ -129,13 +121,9 @@ has_primal_degenerate_row(const arbsdp_problem *p, slong prec)
         /* rowNorm_i^2 = sum_b ||A_{i+1}^b||_F^2  (matno = i+1). */
         arb_zero(sq);
         for (int b = 0; b < nb; b++) {
-            slong n = block_side(p, b);
-            arb_mat_t Ai;
-            arb_mat_init(Ai, n, n);
-            arbsdp_problem_block_mat(Ai, p, i + 1, b, prec);
-            arb_mat_frobenius_norm(fn, Ai, prec);
+            /* A_{i+1}^b from the per-(solve, prec) cache (bead 6b6). */
+            arb_mat_frobenius_norm(fn, arbsdp_pcache_A(pc, i, b), prec);
             arb_addmul(sq, fn, fn, prec); /* sq += ||A_i^b||_F^2 */
-            arb_mat_clear(Ai);
         }
         arb_sqrt(row_norm + i, sq, prec);
         if (arb_gt(row_norm + i, global))
@@ -226,6 +214,21 @@ int
 arbsdp_factor_with_reg(arb_mat_t L, const arb_mat_t M, arbsdp_regstate *rs,
                        const arbsdp_problem *p, slong prec, int *attempts_out)
 {
+    /* On-demand entry point: materialize the data once for this call (the same
+     * cost as the pre-cache diagnose) and run the cached path. */
+    arbsdp_pcache pc;
+    int ok;
+    assert(p != NULL);
+    arbsdp_pcache_init(&pc, p, prec);
+    ok = arbsdp_factor_with_reg_pc(L, M, rs, &pc, prec, attempts_out);
+    arbsdp_pcache_clear(&pc);
+    return ok;
+}
+
+int
+arbsdp_factor_with_reg_pc(arb_mat_t L, const arb_mat_t M, arbsdp_regstate *rs,
+                          arbsdp_pcache *pc, slong prec, int *attempts_out)
+{
     slong m;
     int primal_degen;
     arb_mat_t Mreg;
@@ -236,17 +239,22 @@ arbsdp_factor_with_reg(arb_mat_t L, const arb_mat_t M, arbsdp_regstate *rs,
     assert(L != NULL);
     assert(M != NULL);
     assert(rs != NULL);
-    assert(p != NULL);
+    assert(pc != NULL);
+    assert(pc->prec == prec);
     assert(arb_mat_nrows(M) == arb_mat_ncols(M));
     assert(arb_mat_nrows(L) == arb_mat_nrows(M));
     assert(arb_mat_ncols(L) == arb_mat_ncols(M));
-    assert(p->m == arb_mat_nrows(M)); /* diagnose row count must match M (rule 5) */
+    assert(pc->m == arb_mat_nrows(M)); /* diagnose row count must match M (rule 5) */
 
     m = arb_mat_nrows(M);
 
     /* Diagnose input precomputed ONCE (matches makeSdpDiagnose closing over its
-     * rowNorms; Regularization.ts:174-186): is any constraint row degenerate? */
-    primal_degen = has_primal_degenerate_row(p, prec);
+     * rowNorms; Regularization.ts:174-186): is any constraint row degenerate?
+     * It depends only on the constant data at `prec`, so it is memoized in the
+     * per-(solve, prec) cache (bead 6b6) instead of recomputed per factorization. */
+    if (pc->primal_degen < 0)
+        pc->primal_degen = has_primal_degenerate_row(pc, prec);
+    primal_degen = pc->primal_degen;
 
     arb_mat_init(Mreg, m, m);
     arb_init(lift);
