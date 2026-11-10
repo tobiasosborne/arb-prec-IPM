@@ -222,9 +222,10 @@ next_token_dup(char **cursor)
  * (CLAUDE.md rule 5).  We therefore whitelist the literal grammar
  *     [+-]? ( D+ ( '.' D* )? | '.' D+ ) ( [eE] [+-]? D+ )?
  * and THEN require arb_set_str to succeed and give a finite value (belt and
- * braces: the grammar already excludes every non-finite spelling). */
-static int
-decimal_is_valid(const char *s)
+ * braces: the grammar already excludes every non-finite spelling).
+ * Exported (io.h) so the CLI --trace-bound parser shares it (bead 2ny). */
+int
+arbsdp_decimal_is_valid(const char *s)
 {
     const char *q = s;
     int ndig = 0;
@@ -383,7 +384,7 @@ arbsdp_read_sdpa(arbsdp_problem *p, const char *path)
         cursor = buf;
         for (int i = 0; i < p->m; i++) {
             char *tok = next_token_dup(&cursor);
-            if (tok == NULL || decimal_is_valid(tok) != 0) {
+            if (tok == NULL || arbsdp_decimal_is_valid(tok) != 0) {
                 free(tok);
                 goto done; /* missing or malformed b value */
             }
@@ -435,7 +436,7 @@ arbsdp_read_sdpa(arbsdp_problem *p, const char *path)
         if (next_int(&cursor, &l) != 0)
             goto done;
         val = next_token_dup(&cursor);
-        if (val == NULL || decimal_is_valid(val) != 0) {
+        if (val == NULL || arbsdp_decimal_is_valid(val) != 0) {
             free(val);
             goto done;
         }

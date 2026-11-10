@@ -65,7 +65,9 @@ arbsdp solve problem.dat-s --target-digits 30 --trace-bound 1
 
 `--trace-bound V` (or `B:V` per block) supplies the a-priori `tr X ≤ V` bound that
 a finite rigorous bracket requires; without it an unbounded block is reported
-honestly as `-inf`/`+inf`. The printed `obj_lb`/`obj_ub` are *directed* decimals
+honestly as `-inf`/`+inf`. `V` must be a finite decimal literal `>= 0`; `inf`,
+`nan`, ball syntax (`1+/-0.1`, `[1]`) and doubled signs (`--1`) are rejected
+with exit code 4 before the solve. The printed `obj_lb`/`obj_ub` are *directed* decimals
 (lb rounded down, ub rounded up) so the printed interval still encloses the
 optimum. A `status` of `primal_infeasible` / `dual_infeasible` is a verified
 ball-arithmetic Farkas certificate. Run `arbsdp --help` for all options.

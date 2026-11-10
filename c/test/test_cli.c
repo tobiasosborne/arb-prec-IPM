@@ -189,6 +189,98 @@ test_error_paths(void)
     CHECK(ex != 0, "error-noargs: no arguments must exit nonzero");
 }
 
+/* ----- Test 4b: --trace-bound token validation (bead arb-prec-IPM-2ny) -----
+ * The trace bound xbar is a RIGOR-RELEVANT a-priori input (CLAUDE.md invariant
+ * 5): the certified [lb, ub] is a theorem only if xbar_b >= tr(X_b).  FLINT
+ * 3.0.1 arb_set_str ACCEPTS "inf", "nan", "1+/-0.1", "[1]" and "--1" (read as
+ * +1, a silent sign flip), so a raw arb_set_str parse lets a malformed token
+ * silently become a different bound.  Every token below must be REJECTED
+ * fail-loud: exit CLI_PARSE_ERR (4), a stderr message naming --trace-bound, and
+ * NO JSON on stdout.  Negative values are rejected too: tr(X_b) >= 0 on a PSD or
+ * diagonal block, so xbar < 0 asserts an empty feasible set -- a sign typo, not
+ * a usable bound (see src/cli.c).  Both the all-blocks form V and the per-block
+ * form B:V are exercised. */
+static void
+check_bad_trace_token(const char *tok)
+{
+    char cmd[CMD_MAX];
+    char out[OUT_MAX];
+    char msg[256];
+    int rc, ex;
+
+    /* stdout only (stderr discarded): must be empty of JSON, exit 4. */
+    snprintf(cmd, sizeof cmd,
+             "%s solve %s/max_eigenvalue_2x2/max_eigenvalue_2x2.dat-s "
+             "--target-digits 8 --trace-bound '%s' 2>/dev/null",
+             ARBSDP_BIN, GOLDEN_DIR, tok);
+    rc = run_capture(cmd, out, sizeof out, &ex);
+    snprintf(msg, sizeof msg, "bad-trace '%s': popen failed", tok);
+    CHECK(rc == 0, msg);
+    snprintf(msg, sizeof msg, "bad-trace '%s': must exit CLI_PARSE_ERR (4), got %d",
+             tok, ex);
+    CHECK(ex == 4, msg);
+    snprintf(msg, sizeof msg, "bad-trace '%s': stdout must carry no JSON", tok);
+    CHECK(strchr(out, '{') == NULL, msg);
+
+    /* stderr only (stdout discarded): must name the offending option. */
+    snprintf(cmd, sizeof cmd,
+             "%s solve %s/max_eigenvalue_2x2/max_eigenvalue_2x2.dat-s "
+             "--target-digits 8 --trace-bound '%s' 2>&1 >/dev/null",
+             ARBSDP_BIN, GOLDEN_DIR, tok);
+    rc = run_capture(cmd, out, sizeof out, &ex);
+    snprintf(msg, sizeof msg, "bad-trace '%s': popen failed (stderr)", tok);
+    CHECK(rc == 0, msg);
+    snprintf(msg, sizeof msg, "bad-trace '%s': stderr must mention --trace-bound", tok);
+    CHECK(strstr(out, "--trace-bound") != NULL, msg);
+}
+
+static void
+test_trace_bound_validation(void)
+{
+    static const char *bad[] = {
+        /* non-finite spellings arb_set_str accepts */
+        "inf", "+inf", "-inf", "Inf", "nan", "NaN", "[inf]",
+        /* ball syntax: a radius is not an a-priori bound */
+        "1+/-0.1", "[1+/-0.1]", "[1]", "[+/-1]",
+        /* doubled sign: arb_set_str reads "--1" as +1 */
+        "--1", "+-1", "-+1",
+        /* negative: tr(X_b) >= 0, so xbar < 0 is a sign error */
+        "-1", "-0.5", "-1e-30",
+        /* plain garbage / malformed literals */
+        "", "abc", "1e", "1.2.3", ".", "1 ", "0x10",
+        /* the same through the per-block B:V form */
+        "0:inf", "0:nan", "0:--1", "0:1+/-0.1", "0:[1]", "0:-1", "0:", "0:abc",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        check_bad_trace_token(bad[i]);
+}
+
+/* Valid trace-bound literals must still be accepted (no over-rejection):
+ * a completed run, exit 0, an optimal certificate. */
+static void
+test_trace_bound_valid_forms(void)
+{
+    static const char *good[] = { "1", "1.0", "1e0", "+1", "10E-1", ".1e1",
+                                  "0:1", "0:+1.000" };
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++) {
+        char cmd[CMD_MAX];
+        char out[OUT_MAX];
+        char msg[256];
+        int rc, ex;
+        snprintf(cmd, sizeof cmd,
+                 "%s solve %s/max_eigenvalue_2x2/max_eigenvalue_2x2.dat-s "
+                 "--target-digits 8 --trace-bound '%s' 2>/dev/null",
+                 ARBSDP_BIN, GOLDEN_DIR, good[i]);
+        rc = run_capture(cmd, out, sizeof out, &ex);
+        snprintf(msg, sizeof msg, "good-trace '%s': popen failed", good[i]);
+        CHECK(rc == 0, msg);
+        snprintf(msg, sizeof msg, "good-trace '%s': must exit 0, got %d", good[i], ex);
+        CHECK(ex == 0, msg);
+        snprintf(msg, sizeof msg, "good-trace '%s': must certify optimal", good[i]);
+        CHECK(strstr(out, "\"status\": \"optimal\"") != NULL, msg);
+    }
+}
+
 /* ----- Test 5: JSON round-trip through a real parser (bead acceptance) ----
  * Pipe the CLI's stdout straight into python3's json.load; a zero exit proves
  * the emitted bytes are valid JSON (the strongest end-to-end check).  python3 is
@@ -228,6 +320,8 @@ main(void)
     test_solve_optimal();
     test_solve_dual_infeasible();
     test_error_paths();
+    test_trace_bound_validation();
+    test_trace_bound_valid_forms();
     test_json_roundtrip();
 
     if (failures != 0) {

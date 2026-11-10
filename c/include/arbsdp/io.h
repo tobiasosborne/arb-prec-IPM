@@ -35,6 +35,17 @@ extern "C" {
  */
 
 /*
+ * arbsdp_decimal_is_valid -- 0 iff `s` is a plain FINITE decimal / scientific
+ * literal  [+-]? ( D+ ( '.' D* )? | '.' D+ ) ( [eE] [+-]? D+ )?  that arb_set_str
+ * parses to a finite value; nonzero otherwise.  Rejects everything FLINT 3.0.1
+ * arb_set_str silently accepts beyond that grammar: inf/nan spellings, ball
+ * syntax ("1+/-0.1", "[1]"), a doubled sign ("--1" -> +1), surrounding blanks.
+ * Used by the SDPA reader for problem data (bead 37w) and by the CLI for the
+ * rigor-relevant --trace-bound input (bead 2ny).
+ */
+int arbsdp_decimal_is_valid(const char *s);
+
+/*
  * arbsdp_arb_decimal -- a RIGOROUS directed decimal string for x.  round_up=0
  * rounds toward -inf (a guaranteed LOWER bound on x); round_up=1 rounds toward
  * +inf (a guaranteed UPPER bound).  `digits` = significant decimal digits.

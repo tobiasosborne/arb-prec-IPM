@@ -63,7 +63,9 @@ usage(FILE *out)
 "  --target-digits D  requested decimal digits of accuracy (default 30)\n"
 "  --trace-bound V    a-priori bound tr(X_b) <= V for ALL blocks\n"
 "  --trace-bound B:V  a-priori bound tr(X_b) <= V for block B (0-indexed);\n"
-"                     repeatable; overrides the all-blocks value for that block\n",
+"                     repeatable; overrides the all-blocks value for that block\n"
+"                     V must be a finite decimal literal >= 0 (e.g. 1, 2.5e3);\n"
+"                     omit the option for an unbounded block (no 'inf')\n",
         out);
 }
 
@@ -107,6 +109,42 @@ parse_int(const char *s, int *out)
     if (v < INT_MIN || v > INT_MAX)
         return 1;
     *out = (int) v;
+    return 0;
+}
+
+/* parse_trace_value -- parse ONE --trace-bound value token into `out` (bead
+ * arb-prec-IPM-2ny).  Returns 0 on success, nonzero on rejection.
+ *
+ * The trace bound xbar_b is a RIGOR-RELEVANT a-priori input (CLAUDE.md invariant
+ * 5): the certified [lb, ub] is a theorem only if xbar_b >= tr(X_b).  A raw
+ * arb_set_str is NOT a sufficient parser: FLINT 3.0.1 accepts "inf", "nan",
+ * ball syntax "1+/-0.1" / "[1]" and "--1" (read as +1), so a typo would silently
+ * become a DIFFERENT bound.  We therefore require:
+ *   1. SYNTAX -- the strict finite decimal-literal grammar shared with the SDPA
+ *      reader (arbsdp_decimal_is_valid, io.c, bead 37w).  This also rejects an
+ *      explicit "inf": "no bound" is spelled by OMITTING the flag (an unset
+ *      xbar_set flag), the single source of truth in arbsdp_apriori.
+ *   2. SEMANTICS -- xbar >= 0.  Every block is PSD or diagonal-nonnegative, so
+ *      tr(X_b) >= 0 and a negative xbar asserts the feasible set is EMPTY.  The
+ *      Jansson consumers (arbsdp_lower_bound / arbsdp_upper_bound, certify.c)
+ *      multiply min(0, dlo_b) / max(0, dhi_b) by xbar_b, so a negative xbar flips
+ *      the sign of the penalty: lb moves UP and ub moves DOWN, producing a
+ *      narrow "optimal" bracket that is only vacuously true (of an empty set) --
+ *      i.e. a sign typo would yield a confident, wrong certificate for the
+ *      user's actual problem.  Rejected fail-loud (CLAUDE.md rule 5).
+ *      xbar = 0 is accepted: it is a legitimate (if strong) claim X_b = 0.
+ * The literal is parsed at `prec` bits; arb_set_str then yields a ball that
+ * ENCLOSES the decimal value (e.g. 0.1), which the certifier's ball products
+ * consume rigorously. */
+static int
+parse_trace_value(arb_t out, const char *tok, slong prec)
+{
+    if (arbsdp_decimal_is_valid(tok) != 0)
+        return 1;
+    if (arb_set_str(out, tok, prec) != 0 || !arb_is_finite(out))
+        return 1;
+    if (!arb_is_nonnegative(out))
+        return 1;
     return 0;
 }
 
@@ -206,12 +244,14 @@ main(int argc, char **argv)
         return CLI_IO_ERR;
     }
 
-    /* From here on a single `cleanup` label tears everything down. */
+    /* From here on a single `cleanup` label tears everything down.  The trace
+     * bounds are parsed BEFORE the solve (fail fast: a malformed bound never costs
+     * a solve), so the adaptive result is init'd only once they are accepted. */
     int exit_code = CLI_OK;
     char *json = NULL;
+    int have_ar = 0;
 
     arbsdp_adaptive_result ar;
-    arbsdp_solve_adaptive(&ar, &p, &pp); /* POINT MODE -- certifies nothing */
 
     arbsdp_apriori ab;
     arbsdp_apriori_init(&ab, p.nblocks);
@@ -223,7 +263,8 @@ main(int argc, char **argv)
 
     /* ----- apply --trace-bound: all-blocks first, then per-block override
      * (CLAUDE.md invariant 5: NO silent boundedness -- an unset block stays
-     * unbounded and the certifier reports -inf for it honestly). */
+     * unbounded and the certifier reports -inf for it honestly).  Omitting the
+     * flag is the ONLY way to say "no bound"; an explicit "inf" is rejected. */
     {
         slong parse_prec = pp.prec_max > 256 ? pp.prec_max : 256;
 
@@ -231,9 +272,9 @@ main(int argc, char **argv)
         for (int k = 0; k < n_trace; k++) {
             if (strchr(trace_args[k], ':') != NULL)
                 continue; /* per-block; handled in pass B */
-            if (arb_set_str(tbval, trace_args[k], parse_prec) != 0) {
-                fprintf(stderr, "arbsdp: invalid --trace-bound value '%s'\n",
-                        trace_args[k]);
+            if (parse_trace_value(tbval, trace_args[k], parse_prec) != 0) {
+                fprintf(stderr, "arbsdp: invalid --trace-bound value '%s' "
+                        "(need a finite decimal literal >= 0)\n", trace_args[k]);
                 exit_code = CLI_PARSE_ERR;
                 goto cleanup;
             }
@@ -259,15 +300,19 @@ main(int argc, char **argv)
                 exit_code = CLI_PARSE_ERR;
                 goto cleanup;
             }
-            if (arb_set_str(tbval, colon + 1, parse_prec) != 0) {
-                fprintf(stderr, "arbsdp: invalid --trace-bound value in '%s'\n",
-                        trace_args[k]);
+            if (parse_trace_value(tbval, colon + 1, parse_prec) != 0) {
+                fprintf(stderr, "arbsdp: invalid --trace-bound value in '%s' "
+                        "(need a finite decimal literal >= 0)\n", trace_args[k]);
                 exit_code = CLI_PARSE_ERR;
                 goto cleanup;
             }
             arbsdp_apriori_set_xbar(&ab, (int) b, tbval);
         }
     }
+
+    /* ----- solve (Layer 0, POINT MODE -- certifies nothing) -------------- */
+    arbsdp_solve_adaptive(&ar, &p, &pp);
+    have_ar = 1;
 
     /* ----- certify (Layer 1, ball arithmetic) + serialize ---------------- */
     {
@@ -286,7 +331,8 @@ cleanup:
     arb_clear(lb);
     arb_clear(tbval);
     arbsdp_apriori_clear(&ab);
-    arbsdp_adaptive_result_clear(&ar);
+    if (have_ar)
+        arbsdp_adaptive_result_clear(&ar);
     arbsdp_problem_clear(&p);
     free(trace_args);
     flint_cleanup(); /* free FLINT's thread-local pools (valgrind cleanliness) */
