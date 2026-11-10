@@ -22,6 +22,12 @@
  * Cholesky), single-shot Gershgorin (kept as the bisection SEED only), and
  * Newton/secant on the shift (degenerate: d(lambda_min)/ds = -1).  See §5.3.1 for
  * the comparison table and the loser-by-loser rationale.
+ * Bead ml6 (second audition, §5.3.1 addendum) replaced the bisection as the
+ * DEFAULT path by a SEEDED shift: a point-mode estimate sigma ~ lambda_min (double
+ * Jacobi + arb RQI; non-rigorous, direction only -- the one eig use invariant 2
+ * allows) and one ball Cholesky at s = sigma - delta, delta ~ 2^(log2 n + 6 - prec)
+ * * scale, widened geometrically on failure; bisection is now the fallback.
+ * Rigor is unchanged: d is always the Gershgorin floor or a proven shift.
  *
  * Memory discipline (CLAUDE.md rule 7): callers own init/clear of every argument
  * (the arb_mat inputs and the arb / arb_mat outputs); these functions allocate
@@ -98,12 +104,16 @@ void arbsdp_gershgorin_upper_bound(arb_t out, const arb_mat_t A, slong prec);
 
 /*
  * arbsdp_lambda_min_lower_bound -- rigorous lower bound d on lambda_min(A) via
- * the verified-Cholesky shift + bisection (MATH_SPEC §5.3 / §5.3.1).
+ * the seeded verified-Cholesky shift, bisection as fallback (MATH_SPEC §5.3 /
+ * §5.3.1 incl. the ml6 addendum).  Tightness: lambda_min - d is typically
+ * <= 2^(clog2(n) + 6 - prec) * scale (scale >= spectral radius), i.e. ~prec - 11
+ * certified bits at n = 32 (was prec/2 before bead ml6), for ~1 cho probe.
  *
  * GUARANTEE (THEOREM, CLAUDE.md rule 2): d <= lambda_min(A).  The guarantee is on
- * d's VALUE -- d is returned as the last shift s with a SUCCESSFUL ball Cholesky
- * of (A - s*I), and the shift is subtracted at its UPPER endpoint when forming
- * (A - s*I), so a success proves A - upper(s)*I >= 0, i.e. lambda_min(A) >= s.
+ * d's VALUE -- d is either the Gershgorin floor or a shift s with a SUCCESSFUL
+ * ball Cholesky of (A - s*I), and the shift is subtracted at its UPPER endpoint
+ * when forming (A - s*I), so a success proves A - upper(s)*I >= 0, i.e.
+ * lambda_min(A) >= s.  A with a non-finite entry gives d = -inf (honest).
  * A returned d may be <= 0 for indefinite / rank-deficient A (the SDP-boundary
  * case): that is a FIRST-CLASS valid output (it feeds the min(0,d) penalty in the
  * Jansson lower bound), NOT an error.  d NEVER exceeds lambda_min(A).
@@ -111,6 +121,18 @@ void arbsdp_gershgorin_upper_bound(arb_t out, const arb_mat_t A, slong prec);
  * A is square (asserted); `d` must be initialized.  prec is the working precision.
  */
 void arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec);
+
+/*
+ * arbsdp_lambda_min_lower_bound_seeded -- the same THEOREM d <= lambda_min(A),
+ * with an explicit NON-RIGOROUS hint `seed` ~ lambda_min(A) (NULL: computed
+ * internally by a point-mode eigenvalue estimate, MATH_SPEC §5.3.1 ml6).  The
+ * seed only steers where the verified Cholesky shifts are probed; it is never
+ * returned unproven.  Any seed value (NaN, +-inf, wildly wrong) is safe: d is
+ * always max(Gershgorin floor, a shift s with a successful ball Cholesky of
+ * A - s*I).  Returns the number of arb_mat_cho probes spent (diagnostic).
+ */
+slong arbsdp_lambda_min_lower_bound_seeded(arb_t d, const arb_mat_t A,
+                                           const arf_t seed, slong prec);
 
 /* ==========================================================================
  * Layer-1 dual residual + a-priori bounds (bead arb-prec-IPM-b18)

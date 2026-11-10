@@ -64,6 +64,8 @@ target_link_libraries(arbsdp
         ${FLINT_LIBRARIES}
         mpfr
         gmp
+        # libm: sqrt in certify.c's double-precision Jacobi seed (bead ml6).
+        m
 )
 
 target_link_directories(arbsdp

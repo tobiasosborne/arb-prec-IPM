@@ -759,13 +759,96 @@ at arb precision (`eig_audition.c`).  The returned `d` satisfies `d <= lambda_mi
 as a theorem; `d` may be `<= 0` for indefinite / rank-deficient Z (the boundary case),
 which is exactly what the `min(0, d_b)` penalty in §5.4 consumes.
 
-**Search parameters (binding).** Seed `s_lo` = Gershgorin lower bound
+**Search parameters (b17; SUPERSEDED as the default path by the ml6 addendum
+below -- this bisection is now the FALLBACK, with tol `2^(clog2(n)+6-prec)*scale`).**
+Seed `s_lo` = Gershgorin lower bound
 `min_i( lbound(Z_ii) - sum_{j!=i} ubound(|Z_ij|) )`; maintain the bracket invariant
 `[s_lo: chol passes, s_hi: chol fails]`; bisect to `tol = 2^(-prec/2) * max(1, ||Z||_Gershgorin)`;
 `ITER_CAP = 60`; on a chol failure near the boundary, retry once at `prec*3/2` before
 trusting the failure (precision-starvation guard).  The shift is subtracted at its
 UPPER endpoint so a success proves the bound for the true (point) shift.  Z is
 `arbsdp_symmetrize`d first (arb_mat_cho reads only the lower triangle).
+
+**ml6 addendum (2026-11): seeded shift -- second audition (bead arb-prec-IPM-ml6).**
+Problem: the b17 bisection stopped at `2^(-prec/2)*||Z||`, so only prec/2 of prec_c
+became certificate bits, at ~prec/2 O(n^3 M(prec)) Cholesky probes per bound (plus a
+`prec*3/2` retry on every failing midpoint).
+
+*Where does ball Cholesky stop proving PD?* Measured (exact rational
+`A = Q D Q^T`, Q = 3 rational Householders; probe `cho(A - (lmin - delta) I)` with the
+TRUE lmin): the smallest passing `delta = 2^(log2||A||_F - prec + k)` has k = 1..3
+(n = 2), 2..5 (n = 8), 2..5 (n = 16), 3..7 (n = 32), identical at prec 128/512/2048,
+for lmin = 0, 2^-100, -1/3 and a 1/1+2^-60/1+2^-30 cluster (diagonal A: exact, any
+delta).  This matches the Cholesky backward-error bound `|dA| <= gamma_{n+1}|L||L^T|`
+(Demmel 1989; Higham ASNA §10.1): the limit is ~n 2^-prec ||A||, NOT 2^(-prec/2).
+Near-degenerate clusters can need more (a 2^-60-gap pair at n = 16 needed ~2^20 more
+in one fixture), and input radii add `||rad||_2 <= n*maxrad`.  Hence
+`delta0 = max(2^(clog2(n)+6-prec)*scale, 16*n*maxrad)`, scale = max(|Gershgorin lo|,
+|Gershgorin hi|) >= rho(A): >= 4 bits headroom over the measured n <= 32 limit.
+
+*Candidates* (harness: 20 matrices per prec = kinds {lmin=0, 2^-100, cluster
+1/1+2^-60/1+2^-30, -1/3, wide 1..2^60} x n {2,8,16,32}; slack = exact `lmin - d`,
+reported as `log2(slack/scale) + prec` = bits of prec NOT certified; worst case over
+the 20; probes and wall time summed over the 20; rigor violations = 0 for every row):
+
+| method | worst lost bits (prec 128 / 512 / 2048) | cho probes (128 / 512 / 2048) | ms (128 / 512 / 2048) |
+|--------|------|------|------|
+| M0 status quo (b17 bisection, tol 2^(-prec/2)) | 64 / 256 / 1024 | 2005 / 7238 / 27863 | 178 / 1514 / 29964 |
+| M1 bisection, tight tol 2^-(prec-clog2 n-8) | 13 / 13 / 13 | 3515 / 13839 / 55102 | 336 / 3298 / 59349 |
+| M2 seeded bisection (double-eig bracket +-2^-40 scale, tight tol) | 12 / 13 / 13 | 2305 / 13438 / 57944 | 267 / 3057 / 64501 |
+| M3 seed (double Jacobi + RQI, no Ritz) + back-off, fallback M1 | 27 / 27 / 27 | 21 / 807 / 6211 | 61 / 134 / 2320 |
+| M3R as M3, Rump-2006 a-priori delta = (n+2) 2^-prec tr|A - sigma I| | 24 / 24 / 24 | 148 / 1318 / 8258 | 60 / 138 / 2272 |
+| **FINAL (M3 + Rayleigh-Ritz band stage + deflation; certify.c)** | **15 / 15 / 15** | **21 / 21 / 21** | **78 / 125 / 730** |
+
+Per case the FINAL path spends 1 probe (2 for the n = 32 wide case with a repeated
+eigenvalue 1); e.g. lmin = 0, n = 32, prec 2048: M0 1026 probes 3841 ms 1023 lost bits
+-> FINAL 1 probe 40 ms 11 lost bits.
+
+*Decision: FINAL.*  sigma = point estimate (double cyclic Jacobi on 2^-e mid(A); if
+>1 eigenvalue lies within 2^-40 scale of the smallest, Rayleigh-Ritz on that band at
+prec+32 with the projected matrix re-scaled to its own width; then Rayleigh-quotient
+iteration at prec+32 from each band start vector, deflating found pairs by a
+2*scale rank-1 shift after projecting the next START vector off them; sigma = min).
+Probe `s = round_down(sigma - delta)` (an exact arf, so the proved shift is exactly
+the returned d), widen delta by 2^4, 2^16, 2^64 on failure (<= 4 probes); if
+`s <= g` return the Gershgorin floor g when g <= sigma + delta (it is as tight as a
+probe, e.g. Gershgorin-exact [[a,1],[1,a]]), else fall back to the b17 bisection with
+tol `2^(clog2(n)+6-prec)*scale` and ITER_CAP prec + 256.  d is ALWAYS g or a shift
+with a successful ball Cholesky; sigma is never returned (adversarial-seed test:
+NaN, +-inf, lmin+1, lmin+2^-400, +-2^1000 -> 0/28 violations).
+Losers: M0 -- wastes half of prec_c and ~prec/2 probes; M1 -- tight but ~prec
+probes (2x M0's cost: the failing probes near the limit each pay the prec*3/2
+retry); M2 -- the double seed only saves ~50 of ~prec halvings, so cost is still
+linear in prec; M3 -- without the Ritz stage the double estimate cannot order a band
+of eigenvalues that are tiny relative to ||A|| (wide spectrum 1..2^60: absolute
+double error 2^8 > the gaps), RQI lands on the wrong band member and the bound falls
+back to bisection (3104 probes at n = 8, prec 2048); M3R -- Rump's a-priori constant
+is a float-Cholesky error bound; in ball arithmetic the Cholesky does its own error
+analysis, and the constant is both larger than needed (lost 24 bits) and not an
+upper bound on what arb needs (clustered n = 2 case failed and fell back).
+Rejected for the seed: `arbsdp_eigh` (ball cyclic Jacobi) at 64-128 bits on
+mid(A) -- NaN eigenvalues (rotation angle divided by an off-diagonal ball containing
+0) and no convergence in 100 sweeps for n = 8..32 (0.5-0.7 s per call at n = 32).
+Projection-only deflation in RQI -- the inverse iteration amplifies the deflated
+directions by 1/(lambda_u - sigma) before the projection removes them; for a
+15-member band it returned Rayleigh quotients ~1e16 on a spectrum in [1, 2^60].
+
+*Certify goldens* (test_certify_bracket configuration; ub-lb = certified width;
+the 65-digit references bound how well opt-lb / ub-opt can be read):
+
+| golden | prec_c | ub-lb before | ub-lb after |
+|--------|-------:|-------------:|------------:|
+| max_eigenvalue_2x2 | 640 | 7.89e-192 | 7.89e-192 (primal Rayleigh lb + Gershgorin-exact ub) |
+| max_eig_tridiag_3x3 | 640 | 9.01e-97 | 2.17e-190 |
+| max_eig_path_4 | 640 | 8.68e-97 | 2.12e-190 |
+| max_eig_path_8 | 384 | 3.84e-58 | 1.18e-62 (now lb-limited: opt-lb 1.17e-62; ub-opt 3.84e-58 -> 4.84e-65) |
+| max_eig_path_16 | 640 | 2.16e-98 | 9.74e-184 |
+| separable_12block | 384 | 4.62e-57 | 3.61e-112 |
+| two_block_corr_coupled | 640 | 6.36 | 6.36 (structural lb, not tolerance-limited) |
+
+Summed `arbsdp_certify_bracket` wall over the 7 goldens: 0.088-0.106 s -> 0.026 s
+(20-rep mean).  The whole test_certify_bracket (15-16 s) is dominated by the solves
+and is unchanged within run-to-run noise; test_farkas output is byte-identical.
 
 **A-priori-bound convention (no block-dimension factor in our trace form).**  Our
 §5.4 uses `x_bar_b >= tr(X_b)` (a TRACE bound).  For symmetric D and `X >= 0`,

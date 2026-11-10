@@ -11,6 +11,7 @@
  */
 
 #include <assert.h>
+#include <math.h>     /* sqrt, fabs: double Jacobi seed (ml6, point mode) */
 #include <stdio.h>
 
 #include <flint/arb.h>
@@ -241,48 +242,43 @@ shift_mat(arb_mat_t B, const arb_mat_t A, const arb_t s, slong prec)
     arf_clear(su);
 }
 
-/* gershgorin_upper -- cheap scale estimate ||A||_approx = max_i (ubound(A_ii) + R_i),
- * R_i = sum_{j!=i} ubound(|A_ij|) (Gershgorin upper radius).  Used only to set the
- * bisection tolerance tol = 2^(-prec/2) * max(1, ||A||_approx); it need not be
- * rigorous (it scales a STOPPING tolerance, not the returned bound).  Stored into
- * the arf `out`. */
+/* lmin_scale -- sc = max(|Gershgorin lower|, |Gershgorin upper|) >= rho(A), the
+ * spectral-radius scale of A (1 if that is 0).  It scales a TOLERANCE / probe
+ * offset only (never the returned bound), so its own rigor is not load-bearing;
+ * it is computed from the rigorous Gershgorin bounds anyway.  A non-finite A
+ * gives a non-finite sc (callers test arf_is_finite). */
 static void
-gershgorin_upper(arf_t out, const arb_mat_t A, slong prec)
+lmin_scale(arf_t sc, const arb_mat_t A, slong prec)
 {
-    slong n = arb_mat_nrows(A);
-    arf_t row, u, diag_u;
-    arb_t tmp;
-    int first = 1;
-    arf_init(row);
-    arf_init(u);
-    arf_init(diag_u);
-    arb_init(tmp);
-    arf_zero(out);
-    for (slong i = 0; i < n; i++) {
-        arf_zero(row);
-        for (slong j = 0; j < n; j++) {
-            if (j == i)
-                continue;
-            arb_abs(tmp, arb_mat_entry(A, i, j));
-            arb_get_ubound_arf(u, tmp, prec);
-            arf_add(row, row, u, prec, ARF_RND_CEIL);
-        }
-        arb_get_ubound_arf(diag_u, arb_mat_entry(A, i, i), prec);
-        arf_abs(diag_u, diag_u);
-        arf_add(row, diag_u, row, prec, ARF_RND_CEIL);
-        if (first) { arf_set(out, row); first = 0; }
-        else       { arf_max(out, out, row); }
-    }
-    arf_clear(row);
-    arf_clear(u);
-    arf_clear(diag_u);
-    arb_clear(tmp);
+    arb_t lo, hi;
+    arb_init(lo);
+    arb_init(hi);
+    arbsdp_gershgorin_lower_bound(lo, A, prec);
+    arbsdp_gershgorin_upper_bound(hi, A, prec);
+    arb_abs(lo, lo);
+    arb_abs(hi, hi);
+    arf_max(sc, arb_midref(lo), arb_midref(hi));
+    if (arf_is_zero(sc))
+        arf_one(sc);
+    arb_clear(lo);
+    arb_clear(hi);
+}
+
+/* ceil(log2(n)) for n >= 1. */
+static slong
+lmin_clog2(slong n)
+{
+    slong c = 0;
+    while (((slong) 1 << c) < n)
+        c++;
+    return c;
 }
 
 /* g(s) = "arb_mat_cho(symmetrize(A) - s*I) succeeds" -- the MONOTONE-DECREASING
- * rigorous predicate (Rump 2006).  A 1 PROVES lambda_min(A) >= s. */
+ * rigorous predicate (Rump 2006).  A 1 PROVES lambda_min(A) >= s.  *probes counts
+ * the O(n^3 M(prec)) factorizations spent (ml6 diagnostic). */
 static int
-cho_passes(const arb_mat_t A, const arb_t s, slong prec)
+cho_passes(const arb_mat_t A, const arb_t s, slong prec, slong *probes)
 {
     slong n = arb_mat_nrows(A);
     arb_mat_t B, L;
@@ -293,49 +289,437 @@ cho_passes(const arb_mat_t A, const arb_t s, slong prec)
     ok = arb_mat_cho(L, B, prec);
     arb_mat_clear(B);
     arb_mat_clear(L);
+    (*probes)++;
     return ok;
 }
 
-/* ---------------------------------------------------------------------------
- * arbsdp_lambda_min_lower_bound -- verified-Cholesky shift + bisection.
- * MATH_SPEC §5.3 / §5.3.1; Rump BIT 2006 Cor 2.4; Higham-Strabic-Sego 2016.
+/* ===========================================================================
+ * POINT-MODE lambda_min ESTIMATE (bead ml6) -- NON-RIGOROUS, DIRECTION ONLY.
+ * ===========================================================================
+ * CLAUDE invariant 2 allows eig only as a non-rigorous seed: nothing below is
+ * ever returned as a bound; it only chooses WHERE the verified Cholesky shift is
+ * probed.  Audition + decision: MATH_SPEC §5.3.1 (ml6 addendum).
  *
- * Seed the Gershgorin floor, probe s=0, establish the bracket invariant
- * [s_lo: chol PASSES, s_hi: chol FAILS], then BISECT the monotone predicate to
- * tol = 2^(-prec/2) * max(1, ||A||_approx).  Return s_lo (the last shift with a
- * successful ball Cholesky), so d = s_lo <= lambda_min(A) is a THEOREM.
+ * Stage 1 (double, cheap): cyclic Jacobi (Golub-Van Loan 4th ed. §8.5.2; the
+ * same rotation formulas as PsdCone.ts eighJacobi / linalg.c arbsdp_eigh) on
+ * 2^-e * mid(sym(A)) in IEEE double.  Gives all eigenpairs to ~2^-50 * ||A||.
+ * arbsdp_eigh itself was auditioned for this stage and REJECTED: run in ball
+ * arithmetic at 64-128 bits it returned NaN eigenvalues (rotation angle divided
+ * by an off-diagonal ball containing 0) and did not converge in 100 sweeps for
+ * n = 8..32 (0.5-0.7 s per call at n = 32).
  *
- * ITER_CAP: bisection terminates on width <= tol (the real stopping rule); the
- * cap is a fail-loud safety net (CLAUDE.md rule 5).  Reaching tol = 2^(-prec/2)
- * from an O(1) bracket needs ~prec/2 halvings, so a FIXED 60 (MATH_SPEC §5.3.1's
- * sketch) would hard-stop at ~2^-60 BEFORE tol for prec > 120, leaving the bound
- * loose -- a stall, not convergence.  The cap therefore scales with prec
- * (max(60, prec/2 + 32)) so the tol-driven stop is the one that fires; 60 is kept
- * as the floor for very low precisions.  (Deviation from the literal "=60" in the
- * sketch, justified: the sketch's tol formula and a fixed 60 are mutually
- * inconsistent for prec=256; the binding TOL formula wins, and the cap must let
- * the loop reach it.) */
-static slong
-lmin_iter_cap(slong prec)
+ * Stage 1b (only when stage 1 leaves a band of k > 1 eigenvalues within 2^-40
+ * scale of the smallest, e.g. a spectrum 1..10 next to 2^60): Rayleigh-Ritz on
+ * that band at prec + 32 (Parlett §11.4), with the k x k projected matrix
+ * shifted and rescaled to its own size before a second double Jacobi, so the
+ * band is ordered to ~2^-52 of its WIDTH; its Ritz vectors become the starts.
+ *
+ * Stage 2 (arb point mode at prec + 32): Rayleigh-quotient iteration (Parlett,
+ * "The Symmetric Eigenvalue Problem", §4.6; cubic convergence: 2^-50 -> 2^-150
+ * -> 2^-450 -> ...) from each Jacobi eigenpair within 2^-40 * scale of the
+ * smallest (the band stage 1 cannot resolve).  After each RQI the converged
+ * pair is DEFLATED by the symmetric rank-1 shift Am <- Am + 2*scale * u u^T
+ * (Wielandt/Hotelling deflation, Saad "Numerical Methods for Large Eigenvalue
+ * Problems" 2nd ed. §4.2), which moves it above the spectrum, so the next RQI
+ * finds a different band member and the minimum over the band is taken.
+ * (Projection-deflation (I - UU^T) was tried first and REJECTED: the inverse
+ * iteration amplifies the deflated directions by 1/(lambda_u - sigma) before
+ * the projection removes them, and the cancellation destroyed the iterate for
+ * a 15-member band -- measured: RQ values ~1e16 on a spectrum in [1, 2^60].)
+ * Midpoints only; radii ignored (arb_mat_approx_*).
+ * ------------------------------------------------------------------------- */
+#define LMIN_RQI_MAXIT    12
+
+/* Double cyclic Jacobi on M (n x n row-major, symmetric, overwritten); V gets
+ * the eigenvectors (columns).  Returns 1 on finite convergence, 0 otherwise. */
+static int
+lmin_jacobi_d(double *M, double *V, slong n)
 {
-    slong c = prec / 2 + 32;
-    return c < 60 ? 60 : c;
+    for (slong i = 0; i < n; i++)
+        for (slong j = 0; j < n; j++)
+            V[i * n + j] = (i == j) ? 1.0 : 0.0;
+    for (int sweep = 0; sweep < 60; sweep++) {
+        double off = 0.0, tot = 0.0;
+        for (slong i = 0; i < n; i++)
+            for (slong j = 0; j < n; j++) {
+                double x = M[i * n + j] * M[i * n + j];
+                tot += x;
+                if (i != j)
+                    off += x;
+            }
+        if (!(tot == tot) || tot > 1e300)
+            return 0;                         /* NaN / overflow: no estimate */
+        if (off <= 1e-36 * tot)
+            return 1;
+        for (slong p = 0; p < n - 1; p++)
+            for (slong q = p + 1; q < n; q++) {
+                double apq = M[p * n + q], th, t, c, s;
+                if (apq == 0.0)
+                    continue;
+                th = (M[q * n + q] - M[p * n + p]) / (2.0 * apq);
+                t = (th >= 0.0 ? 1.0 : -1.0) / (fabs(th) + sqrt(1.0 + th * th));
+                c = 1.0 / sqrt(1.0 + t * t);
+                s = t * c;
+                for (slong r = 0; r < n; r++) {
+                    double x = M[r * n + p], y = M[r * n + q];
+                    M[r * n + p] = c * x - s * y;
+                    M[r * n + q] = s * x + c * y;
+                }
+                for (slong r = 0; r < n; r++) {
+                    double x = M[p * n + r], y = M[q * n + r];
+                    M[p * n + r] = c * x - s * y;
+                    M[q * n + r] = s * x + c * y;
+                }
+                for (slong r = 0; r < n; r++) {
+                    double x = V[r * n + p], y = V[r * n + q];
+                    V[r * n + p] = c * x - s * y;
+                    V[r * n + q] = s * x + c * y;
+                }
+            }
+    }
+    return 1;   /* not fully converged after 60 sweeps: still a usable seed */
 }
 
-void
-arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
+/* Rayleigh-quotient iteration (point mode at wp).  v (n x 1) holds the start
+ * vector on entry, the refined unit vector on exit; sigma <- its Rayleigh
+ * quotient.  Returns 1 iff sigma is finite. */
+static int
+lmin_rqi(arb_t sigma, arb_mat_t v, const arb_mat_t Am, const arf_t sc, slong wp)
 {
+    slong n = arb_mat_nrows(Am);
+    arb_mat_t M, W, vt, t1;
+    arb_t nr, rq;
+    arf_t tol;
+    int have = 0;
+
+    arb_mat_init(M, n, n);
+    arb_mat_init(W, n, 1);
+    arb_mat_init(vt, 1, n);
+    arb_mat_init(t1, 1, 1);
+    arb_init(nr);
+    arb_init(rq);
+    arf_init(tol);
+    arf_mul_2exp_si(tol, sc, -wp + 8);
+
+    for (int it = 0; it < LMIN_RQI_MAXIT; it++) {
+        arb_zero(nr);                             /* v <- v / ||v|| */
+        for (slong i = 0; i < n; i++)
+            arb_addmul(nr, arb_mat_entry(v, i, 0), arb_mat_entry(v, i, 0), wp);
+        arb_get_mid_arb(nr, nr);
+        if (!arb_is_positive(nr) || !arb_is_finite(nr))
+            break;
+        arb_sqrt(nr, nr, wp);
+        arb_get_mid_arb(nr, nr);
+        for (slong i = 0; i < n; i++)
+            arb_div(arb_mat_entry(v, i, 0), arb_mat_entry(v, i, 0), nr, wp);
+        arb_mat_get_mid(v, v);
+
+        arb_mat_transpose(vt, v);                 /* rq = v^T Am v */
+        arb_mat_approx_mul(W, Am, v, wp);
+        arb_mat_approx_mul(t1, vt, W, wp);
+        arb_get_mid_arb(rq, arb_mat_entry(t1, 0, 0));
+        if (!arb_is_finite(rq))
+            break;
+        if (have) {
+            arb_sub(nr, rq, sigma, wp);
+            arb_set(sigma, rq);
+            if (arf_cmpabs(arb_midref(nr), tol) <= 0)
+                break;                            /* converged */
+        } else {
+            arb_set(sigma, rq);
+            have = 1;
+        }
+        arb_mat_set(M, Am);                       /* W = (Am - sigma I)^-1 v */
+        for (slong i = 0; i < n; i++)
+            arb_sub(arb_mat_entry(M, i, i), arb_mat_entry(M, i, i), sigma, wp);
+        if (!arb_mat_approx_solve(W, M, v, wp))
+            break;                                /* singular at wp: sigma exact */
+        arb_mat_get_mid(v, W);
+    }
+
+    /* leave v a UNIT vector whatever the exit path (the caller deflates with
+     * v v^T; an unnormalized inverse-iteration iterate would wreck Am). */
+    arb_zero(nr);
+    for (slong i = 0; i < n; i++)
+        arb_addmul(nr, arb_mat_entry(v, i, 0), arb_mat_entry(v, i, 0), wp);
+    arb_get_mid_arb(nr, nr);
+    if (arb_is_positive(nr) && arb_is_finite(nr)) {
+        arb_sqrt(nr, nr, wp);
+        arb_get_mid_arb(nr, nr);
+        for (slong i = 0; i < n; i++)
+            arb_div(arb_mat_entry(v, i, 0), arb_mat_entry(v, i, 0), nr, wp);
+        arb_mat_get_mid(v, v);
+    } else {
+        have = 0;
+    }
+
+    arb_mat_clear(M);
+    arb_mat_clear(W);
+    arb_mat_clear(vt);
+    arb_mat_clear(t1);
+    arb_clear(nr);
+    arb_clear(rq);
+    arf_clear(tol);
+    return have;
+}
+
+/* sigma <- point estimate of lambda_min(A).  Returns 1 iff a finite estimate
+ * was produced (0: A non-finite / degenerate -> caller uses the fallback). */
+static int
+lmin_point_estimate(arf_t sigma, const arb_mat_t A, slong prec)
+{
+    slong n = arb_mat_nrows(A), e, k0 = 0, k1 = 0, nfound = 0;
+    slong wp = prec + 32;
+    double *M, *V, *H = NULL, *Y = NULL;
+    slong *idx, *idy = NULL;
+    arf_t sc, t;
+    arb_mat_t Am, X, S, U, v;
+    arb_t s, c2;
+    int ok = 0;
+
+    if (n == 0)
+        return 0;
+    arf_init(sc);
+    arf_init(t);
+    lmin_scale(sc, A, 64);
+    if (!arf_is_finite(sc)) {
+        arf_clear(sc);
+        arf_clear(t);
+        return 0;
+    }
+    e = arf_abs_bound_lt_2exp_si(sc);
+
+    M = flint_malloc(sizeof(double) * n * n);
+    V = flint_malloc(sizeof(double) * n * n);
+    idx = flint_malloc(sizeof(slong) * n);
+    for (slong i = 0; i < n; i++)            /* M = 2^-e * mid(sym(A)) in double */
+        for (slong j = 0; j < n; j++) {
+            arf_add(t, arb_midref(arb_mat_entry(A, i, j)),
+                    arb_midref(arb_mat_entry(A, j, i)), 64, ARF_RND_NEAR);
+            arf_mul_2exp_si(t, t, -e - 1);
+            M[i * n + j] = arf_get_d(t, ARF_RND_NEAR);
+        }
+
+    arb_mat_init(Am, n, n);
+    arb_mat_init(U, n, n);
+    arb_mat_init(v, n, 1);
+    arb_init(s);
+    arb_init(c2);
+
+    if (!lmin_jacobi_d(M, V, n))
+        goto cleanup;
+
+    /* ---- stage 1: ascending double eigenvalues; band B0 within 2^-40 scale.
+     * (e.g. eigenvalues 1..10 next to 2^60 all fall in B0: double cannot order
+     * them, its absolute error is ~2^-52 * 2^60.) */
+    for (slong i = 0; i < n; i++)
+        idx[i] = i;
+    for (slong a = 0; a < n; a++)
+        for (slong b = a + 1; b < n; b++)
+            if (M[idx[b] * n + idx[b]] < M[idx[a] * n + idx[a]]) {
+                slong tt = idx[a]; idx[a] = idx[b]; idx[b] = tt;
+            }
+    arf_set_d(sigma, M[idx[0] * n + idx[0]]);
+    arf_mul_2exp_si(sigma, sigma, e);         /* fallback: the double estimate */
+    ok = arf_is_finite(sigma);
+    for (k0 = 1; k0 < n; k0++)
+        if (M[idx[k0] * n + idx[k0]] - M[idx[0] * n + idx[0]] > ldexp(1.0, -40))
+            break;
+
+    arb_mat_get_mid(Am, A);
+    arbsdp_symmetrize(Am, wp);
+    arb_mat_get_mid(Am, Am);
+
+    arb_mat_init(X, n, k0);                   /* band basis (start vectors) */
+    arb_mat_init(S, n, k0);
+    for (slong j = 0; j < k0; j++)
+        for (slong i = 0; i < n; i++)
+            arb_set_d(arb_mat_entry(X, i, j), V[i * n + idx[j]]);
+    k1 = k0;
+
+    /* ---- stage 1b: Rayleigh-Ritz on the band (only if |B0| > 1).  X is made
+     * orthonormal at wp (modified Gram-Schmidt, twice), H = X^T Am X - c I with
+     * c = H_00, and H's eigenpairs are taken in double scaled to H's OWN size,
+     * which resolves the band to ~2^-52 of its width instead of 2^-52 of
+     * ||A|| (Parlett §11.4: Ritz values err by O(angle^2 ||A||)).  The Ritz
+     * vectors X y become the start vectors, and the band shrinks to the Ritz
+     * values within 2^-40 of the band width of the smallest. */
+    if (k0 > 1) {
+        arb_mat_t AX, Hm, Xt;
+        slong eh;
+        double hmax = 0.0;
+        for (int pass = 0; pass < 2; pass++)
+            for (slong j = 0; j < k0; j++) {
+                for (slong c = 0; c < j; c++) {
+                    arb_zero(s);
+                    for (slong i = 0; i < n; i++)
+                        arb_addmul(s, arb_mat_entry(X, i, c), arb_mat_entry(X, i, j), wp);
+                    for (slong i = 0; i < n; i++)
+                        arb_submul(arb_mat_entry(X, i, j), s, arb_mat_entry(X, i, c), wp);
+                }
+                arb_zero(s);
+                for (slong i = 0; i < n; i++)
+                    arb_addmul(s, arb_mat_entry(X, i, j), arb_mat_entry(X, i, j), wp);
+                arb_get_mid_arb(s, s);
+                if (!arb_is_positive(s) || !arb_is_finite(s))
+                    goto ritz_skip;
+                arb_sqrt(s, s, wp);
+                for (slong i = 0; i < n; i++)
+                    arb_div(arb_mat_entry(X, i, j), arb_mat_entry(X, i, j), s, wp);
+                arb_mat_get_mid(X, X);
+            }
+        arb_mat_init(AX, n, k0);
+        arb_mat_init(Hm, k0, k0);
+        arb_mat_init(Xt, k0, n);
+        arb_mat_approx_mul(AX, Am, X, wp);
+        arb_mat_transpose(Xt, X);
+        arb_mat_approx_mul(Hm, Xt, AX, wp);
+        arb_get_mid_arb(c2, arb_mat_entry(Hm, 0, 0));
+        for (slong i = 0; i < k0; i++)
+            arb_sub(arb_mat_entry(Hm, i, i), arb_mat_entry(Hm, i, i), c2, wp);
+        arb_mat_get_mid(Hm, Hm);
+        /* eh = exponent of max |H'_ij| */
+        arf_zero(t);
+        for (slong i = 0; i < k0; i++)
+            for (slong j = 0; j < k0; j++)
+                if (arf_cmpabs(arb_midref(arb_mat_entry(Hm, i, j)), t) > 0)
+                    arf_abs(t, arb_midref(arb_mat_entry(Hm, i, j)));
+        if (!arf_is_zero(t) && arf_is_finite(t)) {
+            eh = arf_abs_bound_lt_2exp_si(t);
+            H = flint_malloc(sizeof(double) * k0 * k0);
+            Y = flint_malloc(sizeof(double) * k0 * k0);
+            idy = flint_malloc(sizeof(slong) * k0);
+            for (slong i = 0; i < k0; i++)
+                for (slong j = 0; j < k0; j++) {
+                    arf_add(t, arb_midref(arb_mat_entry(Hm, i, j)),
+                            arb_midref(arb_mat_entry(Hm, j, i)), 64, ARF_RND_NEAR);
+                    arf_mul_2exp_si(t, t, -eh - 1);
+                    H[i * k0 + j] = arf_get_d(t, ARF_RND_NEAR);
+                    if (fabs(H[i * k0 + j]) > hmax)
+                        hmax = fabs(H[i * k0 + j]);
+                }
+            if (hmax > 0.0 && lmin_jacobi_d(H, Y, k0)) {
+                for (slong i = 0; i < k0; i++)
+                    idy[i] = i;
+                for (slong a = 0; a < k0; a++)
+                    for (slong b = a + 1; b < k0; b++)
+                        if (H[idy[b] * k0 + idy[b]] < H[idy[a] * k0 + idy[a]]) {
+                            slong tt = idy[a]; idy[a] = idy[b]; idy[b] = tt;
+                        }
+                for (k1 = 1; k1 < k0; k1++)
+                    if (H[idy[k1] * k0 + idy[k1]] - H[idy[0] * k0 + idy[0]]
+                        > ldexp(1.0, -40))
+                        break;
+                /* S = X * Y(:, idy) : Ritz vectors, ascending Ritz values */
+                for (slong j = 0; j < k1; j++)
+                    for (slong i = 0; i < n; i++) {
+                        arb_zero(s);
+                        for (slong c = 0; c < k0; c++) {
+                            arb_set_d(c2, Y[c * k0 + idy[j]]);
+                            arb_addmul(s, arb_mat_entry(X, i, c), c2, wp);
+                        }
+                        arb_get_mid_arb(arb_mat_entry(S, i, j), s);
+                    }
+                for (slong j = 0; j < k1; j++)
+                    for (slong i = 0; i < n; i++)
+                        arb_set(arb_mat_entry(X, i, j), arb_mat_entry(S, i, j));
+            } else {
+                k1 = k0;
+            }
+        }
+        arb_mat_clear(AX);
+        arb_mat_clear(Hm);
+        arb_mat_clear(Xt);
+    }
+ritz_skip:
+
+    /* ---- stage 2: RQI from each remaining start vector, deflating. */
+    for (slong j = 0; j < k1; j++) {
+        for (slong i = 0; i < n; i++)
+            arb_set(arb_mat_entry(v, i, 0), arb_mat_entry(X, i, j));
+        /* project the START vector off the pairs already found (once, before
+         * any inverse iteration, so nothing is amplified first): otherwise
+         * its Rayleigh quotient on the deflated Am is dominated by the
+         * 2*scale shift and RQI converges back to a deflated pair. */
+        for (slong c = 0; c < nfound; c++) {
+            arb_zero(s);
+            for (slong i = 0; i < n; i++)
+                arb_addmul(s, arb_mat_entry(U, i, c), arb_mat_entry(v, i, 0), wp);
+            for (slong i = 0; i < n; i++)
+                arb_submul(arb_mat_entry(v, i, 0), s, arb_mat_entry(U, i, c), wp);
+        }
+        arb_mat_get_mid(v, v);
+        if (lmin_rqi(s, v, Am, sc, wp)) {
+            if (nfound == 0 || arf_cmp(arb_midref(s), sigma) < 0)
+                arf_set(sigma, arb_midref(s));
+            ok = 1;
+            for (slong i = 0; i < n; i++)
+                arb_set(arb_mat_entry(U, i, nfound), arb_mat_entry(v, i, 0));
+            nfound++;
+            if (j + 1 < k1) {
+                /* deflate: Am <- Am + 2*scale * v v^T (v unit) */
+                arb_set_arf(c2, sc);
+                arb_mul_2exp_si(c2, c2, 1);
+                for (slong r = 0; r < n; r++)
+                    for (slong c = 0; c < n; c++) {
+                        arb_t w;
+                        arb_init(w);
+                        arb_mul(w, arb_mat_entry(v, r, 0), arb_mat_entry(v, c, 0), wp);
+                        arb_addmul(arb_mat_entry(Am, r, c), c2, w, wp);
+                        arb_clear(w);
+                    }
+                arb_mat_get_mid(Am, Am);
+            }
+        }
+    }
+    arb_mat_clear(X);
+    arb_mat_clear(S);
+
+cleanup:
+    flint_free(M);
+    flint_free(V);
+    flint_free(idx);
+    if (H != NULL) flint_free(H);
+    if (Y != NULL) flint_free(Y);
+    if (idy != NULL) flint_free(idy);
+    arb_mat_clear(Am);
+    arb_mat_clear(U);
+    arb_mat_clear(v);
+    arb_clear(s);
+    arb_clear(c2);
+    arf_clear(sc);
+    arf_clear(t);
+    return ok && arf_is_finite(sigma);
+}
+
+/* ---------------------------------------------------------------------------
+ * lmin_bisect -- the FALLBACK: verified-Cholesky shift + bisection (b17 path).
+ * MATH_SPEC §5.3 / §5.3.1; Rump BIT 2006 Cor 2.4; Higham-Strabic-Sego 2016.
+ *
+ * Probe s=0, establish the bracket [s_lo: chol PASSES, s_hi: fence], then BISECT
+ * the monotone predicate to tol = 2^(clog2(n) + 6 - prec) * scale (ml6; was
+ * 2^(-prec/2) * max(1, ||A||), which certified only half of prec).  d = s_lo,
+ * the last shift with a SUCCESSFUL ball Cholesky (or the Gershgorin floor), so
+ * d <= lambda_min(A) is a THEOREM.  Used only when the seeded probes fail
+ * (garbage / non-finite seed, unresolved cluster, precision starvation).
+ *
+ * ITER_CAP: the tol-driven stop is the real rule; from a bracket of width W it
+ * needs log2(W / tol) halvings.  W <= 2^200 * max(1,|g|) on the growth path, so
+ * the cap prec + 256 lets the tol stop fire (fail-loud safety net, rule 5).
+ * ------------------------------------------------------------------------- */
+static void
+lmin_bisect(arb_t d, const arb_mat_t A, const arb_t gersh, slong prec,
+            slong *probes)
+{
+    slong n = arb_mat_nrows(A);
     arb_t s_lo;     /* chol(A - s_lo*I) PASSES => lambda_min(A) >= s_lo (proof) */
-    arb_t s_hi;     /* chol(A - s_hi*I) FAILS  (upper fence on the bracket)     */
+    arb_t s_hi;     /* upper fence: chol FAILS there, or s_hi >= lambda_min      */
     arb_t s_try;    /* growth probe                                             */
     arb_t s_mid;    /* bisection midpoint                                       */
     arb_t width;    /* s_hi - s_lo                                              */
     arb_t tol;      /* stopping tolerance                                       */
-    arb_t gersh;    /* Gershgorin floor: always-valid lower bound on lambda_min */
     arb_t abs_g;
-    arf_t scale;    /* ||A||_approx (Gershgorin upper)                          */
-
-    assert(arb_mat_nrows(A) == arb_mat_ncols(A) && "lambda_min: A must be square");
+    arf_t scale;    /* max(|Gershgorin lo|, |Gershgorin hi|) >= rho(A)          */
 
     arb_init(s_lo);
     arb_init(s_hi);
@@ -343,17 +727,12 @@ arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
     arb_init(s_mid);
     arb_init(width);
     arb_init(tol);
-    arb_init(gersh);
     arb_init(abs_g);
     arf_init(scale);
 
-    /* SEED: the Gershgorin floor is a guaranteed-valid lower bound on lambda_min
-     * and the safe return value of last resort. */
-    arbsdp_gershgorin_lower_bound(gersh, A, prec);
-
     /* PROBE s = 0. */
     arb_zero(s_try);
-    if (cho_passes(A, s_try, prec)) {
+    if (cho_passes(A, s_try, prec, probes)) {
         /* A is (provably) PD: lambda_min >= 0.  s_lo = 0; GROW s upward until a
          * failure gives s_hi.  Growth start = max(1, |gershgorin|), doubling. */
         arb_zero(s_lo);
@@ -368,7 +747,7 @@ arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
         {
             int found_hi = 0;
             for (int k = 0; k < 200; k++) {
-                if (!cho_passes(A, s_try, prec)) {
+                if (!cho_passes(A, s_try, prec, probes)) {
                     arb_set(s_hi, s_try);
                     found_hi = 1;
                     break;
@@ -399,8 +778,8 @@ arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
         arb_zero(s_hi);
         arb_set(s_lo, gersh);
 
-        if (!cho_passes(A, s_lo, prec)) {
-            if (!cho_passes(A, s_lo, prec * 3 / 2)) {
+        if (!cho_passes(A, s_lo, prec, probes)) {
+            if (!cho_passes(A, s_lo, prec * 3 / 2, probes)) {
                 /* Precision-starved even at the Gershgorin floor: the floor is
                  * still a rigorous lower bound (Gershgorin is unconditional), so
                  * return it directly. */
@@ -411,22 +790,14 @@ arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
     }
 
     /* BISECTION on the monotone predicate g(s) = "chol(A - s*I) succeeds".
-     * tol = 2^(-prec/2) * max(1, ||A||_approx).  Invariant: chol passes at s_lo,
-     * fails at s_hi, s_lo <= s_hi.  Each iteration halves (s_hi - s_lo). */
-    gershgorin_upper(scale, A, prec);
-    {
-        arf_t one;
-        arf_init(one);
-        arf_one(one);
-        arf_max(scale, scale, one);          /* max(1, ||A||_approx) */
-        arf_clear(one);
-    }
+     * tol = 2^(clog2(n) + 6 - prec) * scale: the ml6-measured limit where ball
+     * Cholesky still proves PD (MATH_SPEC §5.3.1).  Invariant: chol passes at
+     * s_lo, s_lo <= s_hi.  Each iteration halves (s_hi - s_lo). */
+    lmin_scale(scale, A, prec);
     arb_set_arf(tol, scale);
-    arb_mul_2exp_si(tol, tol, -(prec / 2));  /* tol = scale * 2^(-prec/2) */
+    arb_mul_2exp_si(tol, tol, lmin_clog2(n) + 6 - prec);
 
-    {
-    slong iter_cap = lmin_iter_cap(prec);
-    for (slong iter = 0; iter < iter_cap; iter++) {
+    for (slong iter = 0; iter < prec + 256; iter++) {
         arb_sub(width, s_hi, s_lo, prec);
         if (arb_le(width, tol))
             break;
@@ -434,19 +805,18 @@ arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
         arb_add(s_mid, s_lo, s_hi, prec);
         arb_mul_2exp_si(s_mid, s_mid, -1);   /* s_mid = (s_lo + s_hi)/2 */
 
-        if (cho_passes(A, s_mid, prec)) {
+        if (cho_passes(A, s_mid, prec, probes)) {
             arb_set(s_lo, s_mid);            /* proof lambda_min >= s_mid */
         } else {
             /* precision-starvation guard (CLAUDE.md rule 5): a failure near the
              * boundary may be the prec, not indefiniteness -- retry once higher
              * before trusting it.  Only a CONFIRMED failure moves s_hi (keeping
              * the bracket, hence the returned bound, rigorous). */
-            if (cho_passes(A, s_mid, prec * 3 / 2))
+            if (cho_passes(A, s_mid, prec * 3 / 2, probes))
                 arb_set(s_lo, s_mid);
             else
                 arb_set(s_hi, s_mid);
         }
-    }
     }
 
     /* d = s_lo: the last shift with a SUCCESSFUL ball Cholesky -> d <= lambda_min(A). */
@@ -459,9 +829,129 @@ done:
     arb_clear(s_mid);
     arb_clear(width);
     arb_clear(tol);
-    arb_clear(gersh);
     arb_clear(abs_g);
     arf_clear(scale);
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_lambda_min_lower_bound_seeded -- seeded verified-Cholesky shift (ml6).
+ * MATH_SPEC §5.3.1 (ml6 addendum); Rump BIT 2006 Cor 2.4 (a completed ball
+ * Cholesky of A - s*I proves lambda_min(A) >= s); Gershgorin 1931.
+ *
+ *   g     = Gershgorin floor (rigorous; the bound of last resort).
+ *   sigma = seed, or the point estimate above (NON-rigorous, direction only).
+ *   delta = max(2^(clog2(n) + 6 - prec) * scale, 16 * n * maxrad(A)).
+ *   probe s = round_down(sigma - delta) (an EXACT arf point, so the shift the
+ *   Cholesky proves is exactly the s returned); on failure widen
+ *   delta *= 2^4, then 2^16, then 2^64 (4 probes max).  If s <= g: return g
+ *   when g <= sigma + delta (the floor is as tight as a probe), else fall back.
+ *   success -> d = s (> g).   otherwise -> lmin_bisect (the b17 fallback).
+ *
+ * delta: ball Cholesky proves A - sI > 0 only while lambda_min(A - sI) exceeds
+ * its accumulated radius.  Two sources: (i) rounding, ~n * 2^-prec * scale
+ * (Demmel 1989 / Higham ASNA §10.1: Cholesky backward error gamma_{n+1}|L||L^T|);
+ * measured limit 2^(k - prec) * ||A||_F with k = 1..7 for n = 2..32 (MATH_SPEC
+ * §5.3.1 ml6 table), so clog2(n) + 6 leaves >= 4 bits of headroom at n = 32;
+ * (ii) the input radii: every matrix in the ball must be PD, which needs
+ * lambda_min(mid - sI) > ||rad||_2 <= n * maxrad (factor 16 headroom).
+ * RIGOR: d is either g or an s with a successful ball Cholesky; sigma itself is
+ * never returned.  Any seed (NaN, inf, wrong) only costs probes.
+ * ------------------------------------------------------------------------- */
+slong
+arbsdp_lambda_min_lower_bound_seeded(arb_t d, const arb_mat_t A,
+                                     const arf_t seed, slong prec)
+{
+    slong n = arb_mat_nrows(A);
+    slong probes = 0;
+    arb_t gersh, s;
+    arf_t sigma, delta, sc, r;
+    int have;
+
+    assert(arb_mat_nrows(A) == arb_mat_ncols(A) && "lambda_min: A must be square");
+
+    arb_init(gersh);
+    arb_init(s);
+    arf_init(sigma);
+    arf_init(delta);
+    arf_init(sc);
+    arf_init(r);
+
+    arbsdp_gershgorin_lower_bound(gersh, A, prec);
+    if (!arb_is_finite(gersh)) {
+        /* non-finite A: no finite bound is provable; -inf is the honest one. */
+        arb_neg_inf(d);
+        goto done;
+    }
+
+    if (seed != NULL) {
+        arf_set(sigma, seed);
+        have = arf_is_finite(sigma);
+    } else {
+        have = lmin_point_estimate(sigma, A, prec);
+    }
+
+    if (have) {
+        lmin_scale(sc, A, prec);
+        arf_mul_2exp_si(delta, sc, lmin_clog2(n) + 6 - prec);
+        for (slong i = 0; i < n; i++)            /* delta >= 16 n maxrad */
+            for (slong j = 0; j < n; j++) {
+                arf_set_mag(r, arb_radref(arb_mat_entry(A, i, j)));
+                arf_mul_si(r, r, 16 * n, 64, ARF_RND_UP);
+                arf_max(delta, delta, r);
+            }
+
+        for (int k = 0; k < 4; k++) {
+            arf_t sp;
+            int pass;
+            arf_init(sp);
+            arf_sub(sp, sigma, delta, prec, ARF_RND_FLOOR);
+            if (arf_cmp(sp, arb_midref(gersh)) <= 0) {
+                /* The probe would not beat the Gershgorin floor g.  If the seed
+                 * is CONSISTENT with g (g <= sigma + delta), g is already within
+                 * 2*delta of the seed -- as tight as a probe could get (e.g.
+                 * [[a,1],[1,a]], where Gershgorin is exact): return g, no
+                 * probe.  If g > sigma + delta the seed is provably wrong
+                 * (lambda_min >= g): use the bisection fallback. */
+                arf_add(sp, sigma, delta, prec, ARF_RND_CEIL);
+                pass = (arf_cmp(arb_midref(gersh), sp) <= 0);
+                arf_clear(sp);
+                if (pass) {
+                    arb_set(d, gersh);
+                    goto done;
+                }
+                break;
+            }
+            arb_set_arf(s, sp);                  /* exact point shift */
+            arf_clear(sp);
+            pass = cho_passes(A, s, prec, &probes);
+            if (pass) {
+                arb_set(d, s);                   /* PROOF: lambda_min >= s > g */
+                goto done;
+            }
+            arf_mul_2exp_si(delta, delta, (slong) 4 << (2 * k)); /* 2^4,2^16,2^64 */
+        }
+    }
+
+    lmin_bisect(d, A, gersh, prec, &probes);
+
+done:
+    arb_clear(gersh);
+    arb_clear(s);
+    arf_clear(sigma);
+    arf_clear(delta);
+    arf_clear(sc);
+    arf_clear(r);
+    return probes;
+}
+
+/* ---------------------------------------------------------------------------
+ * arbsdp_lambda_min_lower_bound -- the public entry: seeded verified-Cholesky
+ * shift with the internal point-mode seed (see _seeded above).
+ * ------------------------------------------------------------------------- */
+void
+arbsdp_lambda_min_lower_bound(arb_t d, const arb_mat_t A, slong prec)
+{
+    (void) arbsdp_lambda_min_lower_bound_seeded(d, A, NULL, prec);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1481,3 +1971,4 @@ arbsdp_certify(arb_t lb, arb_t ub, const arbsdp_problem *p,
     }
     return arbsdp_certify_bracket(lb, ub, p, it, ab, prec_c);
 }
+

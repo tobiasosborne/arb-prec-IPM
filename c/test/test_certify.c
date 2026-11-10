@@ -28,6 +28,9 @@
 
 #include <flint/arb.h>
 #include <flint/arb_mat.h>
+#include <flint/fmpq.h>
+#include <flint/fmpq_mat.h>
+#include <flint/fmpq_vec.h>
 
 #include "arbsdp/certify.h"
 #include "arbsdp/linalg.h"
@@ -347,16 +350,14 @@ check_rigor_and_tightness(const arb_t d, const char *true_str, double gap_tol,
  * d <= true lambda_min ALWAYS.  TIGHTNESS: (true - d) < GAP_TOL -- the bisection
  * converged to its tolerance, not stalled at the coarse O(1) bracket.
  *
- * GAP_TOL = 1e-36.  The solver's BINDING stopping tolerance (MATH_SPEC §5.3.1)
- * is tol = 2^(-prec/2) * max(1, ||A||_approx); at prec=256 that is ~scale*2^-128
- * ~ 1.2e-38 (laplacian, scale=4) .. 2.1e-38 (diag(3,1,7), scale=7).  The final
- * gap true - d <= s_hi - s_lo <= tol, so it sits at ~1e-38.  We assert < 1e-36
- * (a small multiple of tol) -- comfortably above the achievable tol yet ~36
- * orders below the coarse bracket gap (O(1) without bisection, the step-4 RED),
- * so it proves CONVERGENCE, not a stall.  (The bead's nominal 1e-40 is BELOW the
- * binding tol formula at prec=256 and so unattainable with that formula; the
- * binding tol wins and the assertion is set just above what it delivers.) */
-#define GAP_TOL 1e-36
+ * GAP_TOL = 1e-70.  Since bead ml6 the bound is the seeded verified-Cholesky
+ * shift (MATH_SPEC §5.3.1, ml6 addendum): d = sigma - delta with
+ * delta = 2^(clog2(n) + 6 - prec) * scale, so at prec=256 the gap is
+ * ~2^-246 * scale ~ 2e-74 .. 9e-75 (measured below).  1e-70 sits ~4 orders above
+ * that and ~70 orders below the coarse O(1) bracket, so it proves convergence.
+ * (History: the pre-ml6 bisection tolerance 2^(-prec/2) * ||A|| gave ~1e-38 and
+ * this gate was 1e-36.) */
+#define GAP_TOL 1e-70
 static void
 test_lambda_min_bisection(void)
 {
@@ -559,21 +560,333 @@ test_lambda_min_growth_exhausted(void)
     arb_mul_2exp_si(lmin, lmin, -1);
     arb_sub(lmin, lmin, t, 4 * prec);
 
-    arbsdp_lambda_min_lower_bound(d, A, prec);
+    /* pass 0: default (seeded) path; pass 1: NaN seed forces the bisection
+     * fallback, whose PD-growth loop is the branch this test was written for
+     * (bead ml6 made the seeded path the default, so it must be forced). */
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) {
+            arbsdp_lambda_min_lower_bound(d, A, prec);
+        } else {
+            arf_t nanseed;
+            arf_init(nanseed);
+            arf_nan(nanseed);
+            arbsdp_lambda_min_lower_bound_seeded(d, A, nanseed, prec);
+            arf_clear(nanseed);
+        }
 
-    arb_get_ubound_arf(du, d, prec);
-    arb_get_lbound_arf(ll, lmin, 4 * prec);
-    CHECK(arf_is_finite(du) && arf_cmp(du, ll) <= 0,
-          "growth-exhausted: d must be finite and <= lambda_min (rigor)");
-    arb_one(floor199); arb_mul_2exp_si(floor199, floor199, 199);
-    arb_get_lbound_arf(du, d, prec);
-    CHECK(arf_cmp(du, arb_midref(floor199)) >= 0,
-          "growth-exhausted: d must not drop below the last proven shift 2^199");
+        arb_get_ubound_arf(du, d, prec);
+        arb_get_lbound_arf(ll, lmin, 4 * prec);
+        CHECK(arf_is_finite(du) && arf_cmp(du, ll) <= 0,
+              "growth-exhausted: d must be finite and <= lambda_min (rigor)");
+        arb_one(floor199); arb_mul_2exp_si(floor199, floor199, 199);
+        arb_get_lbound_arf(du, d, prec);
+        CHECK(arf_cmp(du, arb_midref(floor199)) >= 0,
+              "growth-exhausted: d must not drop below the last proven shift 2^199");
+    }
 
     arf_clear(du); arf_clear(ll);
     arb_clear(d); arb_clear(a); arb_clear(c); arb_clear(t); arb_clear(u);
     arb_clear(lmin); arb_clear(floor199);
     arb_mat_clear(A);
+}
+
+/* ----- Step 5c: seeded lambda_min -- tightness / probes / rigor (bead ml6) - *
+ * Fixtures with EXACTLY known spectrum: A = Q D Q^T with Q a product of three
+ * rational Householder reflectors H = I - 2 v v^T / (v^T v) (exactly orthogonal),
+ * built in fmpq_mat and only then rounded into arb balls.  lambda_min = min D is
+ * an exact rational, so the rigor check d <= lambda_min is decided exactly (no
+ * typed decimals, CLAUDE rule 8). */
+static void
+rational_householder(fmpq_mat_t H, slong n, unsigned *st)
+{
+    fmpz_t vv, x;
+    slong *v = flint_malloc(sizeof(slong) * n);
+    int nz = 0;
+    fmpz_init(vv);
+    fmpz_init(x);
+    while (!nz) {
+        for (slong i = 0; i < n; i++) {
+            *st = *st * 1103515245u + 12345u;
+            v[i] = (slong) ((*st >> 16) % 11) - 5;
+            if (v[i] != 0) nz = 1;
+        }
+    }
+    fmpz_zero(vv);
+    for (slong i = 0; i < n; i++)
+        fmpz_add_si(vv, vv, v[i] * v[i]);
+    for (slong i = 0; i < n; i++)
+        for (slong j = 0; j < n; j++) {
+            fmpq_t t;
+            fmpq_init(t);
+            fmpz_set_si(x, -2 * v[i] * v[j]);
+            fmpq_set_fmpz_frac(t, x, vv);
+            if (i == j)
+                fmpq_add_si(t, t, 1);
+            fmpq_set(fmpq_mat_entry(H, i, j), t);
+            fmpq_clear(t);
+        }
+    fmpz_clear(vv);
+    fmpz_clear(x);
+    flint_free(v);
+}
+
+/* A = Q diag(D) Q^T (exact), rounded to arb at prec.  lmin <- min D (exact). */
+static void
+spectral_fixture(arb_mat_t A, fmpq_t lmin, const fmpq *D, slong n,
+                 unsigned seed, slong prec)
+{
+    fmpq_mat_t Q, H, T, Dm, Qt, R;
+    unsigned st = seed;
+    fmpq_mat_init(Q, n, n); fmpq_mat_init(H, n, n); fmpq_mat_init(T, n, n);
+    fmpq_mat_init(Dm, n, n); fmpq_mat_init(Qt, n, n); fmpq_mat_init(R, n, n);
+    fmpq_mat_one(Q);
+    for (int k = 0; k < 3; k++) {
+        rational_householder(H, n, &st);
+        fmpq_mat_mul(T, Q, H);
+        fmpq_mat_set(Q, T);
+    }
+    fmpq_set(lmin, D + 0);
+    for (slong i = 0; i < n; i++) {
+        fmpq_set(fmpq_mat_entry(Dm, i, i), D + i);
+        if (fmpq_cmp(D + i, lmin) < 0)
+            fmpq_set(lmin, D + i);
+    }
+    fmpq_mat_mul(T, Q, Dm);
+    fmpq_mat_transpose(Qt, Q);
+    fmpq_mat_mul(R, T, Qt);
+    arb_mat_set_fmpq_mat(A, R, prec);
+    fmpq_mat_clear(Q); fmpq_mat_clear(H); fmpq_mat_clear(T);
+    fmpq_mat_clear(Dm); fmpq_mat_clear(Qt); fmpq_mat_clear(R);
+}
+
+/* Exact rigor check: ubound(d) <= lmin (lmin an exact rational). */
+static int
+d_le_exact(const arb_t d, const fmpq_t lmin)
+{
+    arf_t du;
+    arb_t t;
+    int ok;
+    arf_init(du);
+    arb_init(t);
+    /* EXACT upper endpoint mid + rad (no rounding: a rounded-up ubound at a low
+     * precision can step above an exact rational lmin and fake a violation). */
+    arf_set_mag(du, arb_radref(d));
+    arf_add(du, arb_midref(d), du, ARF_PREC_EXACT, ARF_RND_DOWN);
+    if (!arf_is_finite(du)) {
+        ok = arf_is_neg_inf(du);
+    } else {
+        /* exact: du is a dyadic, compare as fmpq */
+        fmpq_t q;
+        fmpq_init(q);
+        arf_get_fmpq(q, du);
+        ok = (fmpq_cmp(q, lmin) <= 0);
+        fmpq_clear(q);
+    }
+    arb_clear(t);
+    arf_clear(du);
+    return ok;
+}
+
+/* log2((lmin - d)/scale) + prec, exactly (scale = Gershgorin |.| bound >= rho(A)).
+ * The tightness gate requires this to be <= 64 (slack <= 2^-(prec-64) * scale). */
+static double
+slack_bits(const arb_t d, const fmpq_t lmin, const arb_mat_t A, slong prec)
+{
+    arb_t L, g;
+    double r;
+    arb_init(L);
+    arb_init(g);
+    arb_set_fmpq(L, lmin, 4 * prec);
+    arb_sub(L, L, d, 4 * prec);
+    arbsdp_gershgorin_upper_bound(g, A, prec);
+    arb_abs(g, g);
+    {
+        arb_t gl;
+        arb_init(gl);
+        arbsdp_gershgorin_lower_bound(gl, A, prec);
+        arb_abs(gl, gl);
+        arb_max(g, g, gl, prec);
+        arb_clear(gl);
+    }
+    if (arb_is_zero(L))
+        r = -1e9;
+    else
+        r = (double) arf_abs_bound_lt_2exp_si(arb_midref(L))
+            - (double) arf_abs_bound_lt_2exp_si(arb_midref(g)) + (double) prec;
+    arb_clear(L);
+    arb_clear(g);
+    return r;
+}
+
+/* Spectrum kinds for the property sweep: 0 singular PSD (lmin = 0),
+ * 1 tiny (2^-100), 2 clustered (1, 1+2^-60, 1+2^-30, ...), 3 indefinite (-1/3),
+ * 4 wide (1 .. 2^60).  Remaining entries are small integers from the seed. */
+static void
+fill_spectrum(fmpq *D, slong n, int kind, unsigned seed)
+{
+    unsigned st = seed;
+    for (slong i = 0; i < n; i++) {
+        st = st * 1103515245u + 12345u;
+        fmpq_set_si(D + i, 2 + (slong) ((st >> 16) % 9), 1);
+    }
+    switch (kind) {
+    case 0: fmpq_zero(D + 0); break;
+    case 1: fmpq_one(D + 0); fmpq_div_2exp(D + 0, D + 0, 100); break;
+    case 2:
+        fmpq_one(D + 0);
+        if (n > 1) { fmpq_one(D + 1); fmpq_div_2exp(D + 1, D + 1, 60); fmpq_add_si(D + 1, D + 1, 1); }
+        if (n > 2) { fmpq_one(D + 2); fmpq_div_2exp(D + 2, D + 2, 30); fmpq_add_si(D + 2, D + 2, 1); }
+        break;
+    case 3: fmpq_set_si(D + 0, -1, 3); break;
+    default:
+        fmpq_one(D + 0);
+        if (n > 1) { fmpq_one(D + n - 1); fmpq_mul_2exp(D + n - 1, D + n - 1, 60); }
+        break;
+    }
+}
+
+/* TIGHTNESS + PROBE-COUNT gates (bead ml6).  Before ml6 the bisection stopped at
+ * 2^(-prec/2)*||A||, i.e. slack_bits ~ prec/2 = 256 at prec 512, with ~prec/2
+ * probes.  Gates: slack_bits <= 64 for every kind at n in {2,8,16}, prec 512,
+ * via BOTH the seeded path (default) and the fallback path (NaN seed forces the
+ * bisection fallback, so its tolerance is gated too); and <= 8 cho probes on the
+ * default (seeded) path. */
+static void
+test_lambda_min_tight_and_cheap(void)
+{
+    const slong prec = 512;
+    const slong ns[] = { 2, 8, 16 };
+    double worst_seeded = -1e9, worst_fallback = -1e9;
+    slong worst_probes = 0;
+    for (int ni = 0; ni < 3; ni++) {
+        for (int kind = 0; kind < 5; kind++) {
+            slong n = ns[ni];
+            fmpq *D = _fmpq_vec_init(n);
+            fmpq_t lmin;
+            arb_mat_t A;
+            arb_t d;
+            arf_t nanseed;
+            slong probes;
+            double sb;
+            fmpq_init(lmin);
+            arb_mat_init(A, n, n);
+            arb_init(d);
+            arf_init(nanseed);
+            fill_spectrum(D, n, kind, 77u + (unsigned) n);
+            spectral_fixture(A, lmin, D, n, 991u + (unsigned) (n * 7 + kind), prec);
+
+            probes = arbsdp_lambda_min_lower_bound_seeded(d, A, NULL, prec);
+            sb = slack_bits(d, lmin, A, prec);
+            CHECK(d_le_exact(d, lmin), "ml6 tight: seeded d <= lmin (rigor)");
+            CHECK(sb <= 64, "ml6 tight: seeded slack <= 2^-(prec-64)*scale");
+            CHECK(probes <= 8, "ml6 probes: seeded path uses <= 8 cho probes");
+
+            if (sb > worst_seeded) worst_seeded = sb;
+            if (probes > worst_probes) worst_probes = probes;
+
+            arf_nan(nanseed);
+            arbsdp_lambda_min_lower_bound_seeded(d, A, nanseed, prec);
+            sb = slack_bits(d, lmin, A, prec);
+            CHECK(d_le_exact(d, lmin), "ml6 tight: fallback d <= lmin (rigor)");
+            CHECK(sb <= 64, "ml6 tight: fallback slack <= 2^-(prec-64)*scale");
+            if (sb > worst_fallback) worst_fallback = sb;
+
+            arf_clear(nanseed);
+            arb_clear(d);
+            arb_mat_clear(A);
+            fmpq_clear(lmin);
+            _fmpq_vec_clear(D, n);
+        }
+    }
+    printf("  [ml6] prec=512 worst log2(slack/scale)+prec: seeded=%.0f fallback=%.0f;"
+           " max seeded probes=%ld\n", worst_seeded, worst_fallback, (long) worst_probes);
+}
+
+/* PROPERTY: d <= lambda_min EXACTLY, for random constructed spectra (singular
+ * PSD, tiny, clustered, indefinite, wide), n in {2,3,5,8}, prec in {64,128,512},
+ * 5 Householder seeds each = 300 cases. */
+static void
+test_lambda_min_property(void)
+{
+    const slong ns[] = { 2, 3, 5, 8 };
+    const slong precs[] = { 64, 128, 512 };
+    int bad = 0, total = 0;
+    for (int ni = 0; ni < 4; ni++)
+        for (int pi = 0; pi < 3; pi++)
+            for (int kind = 0; kind < 5; kind++)
+                for (unsigned s = 0; s < 5; s++) {
+                    slong n = ns[ni], prec = precs[pi];
+                    fmpq *D = _fmpq_vec_init(n);
+                    fmpq_t lmin;
+                    arb_mat_t A;
+                    arb_t d;
+                    fmpq_init(lmin);
+                    arb_mat_init(A, n, n);
+                    arb_init(d);
+                    fill_spectrum(D, n, kind, 13u * s + (unsigned) n);
+                    spectral_fixture(A, lmin, D, n, 5u + 101u * s + (unsigned) kind, prec);
+                    arbsdp_lambda_min_lower_bound(d, A, prec);
+                    total++;
+                    if (!d_le_exact(d, lmin))
+                        bad++;
+                    arb_clear(d);
+                    arb_mat_clear(A);
+                    fmpq_clear(lmin);
+                    _fmpq_vec_clear(D, n);
+                }
+    CHECK(bad == 0, "ml6 property: d <= lambda_min for every constructed spectrum");
+    printf("  [ml6] property: %d/%d constructed spectra bracketed (d <= lmin)\n",
+           total - bad, total);
+}
+
+/* ADVERSARIAL SEED: the seed is a non-rigorous hint; garbage must never leak.
+ * Seeds: NaN, +inf, -inf, lmin+1, lmin + 2^-400 (just above: the classic
+ * "return the seed" trap), +2^1000, -2^1000.  d <= lmin must hold for all, d
+ * must be finite (the Gershgorin floor is finite for finite A). */
+static void
+test_lambda_min_adversarial_seed(void)
+{
+    const slong prec = 512, n = 6;
+    fmpq *D = _fmpq_vec_init(n);
+    fmpq_t lmin;
+    arb_mat_t A;
+    arb_t d;
+    arf_t seed;
+    int bad = 0;
+    fmpq_init(lmin);
+    arb_mat_init(A, n, n);
+    arb_init(d);
+    arf_init(seed);
+    for (int kind = 0; kind < 4; kind++) {
+        fill_spectrum(D, n, kind, 4242u);
+        spectral_fixture(A, lmin, D, n, 31337u + (unsigned) kind, prec);
+        for (int t = 0; t < 7; t++) {
+            arf_t q;
+            arf_init(q);
+            arf_set_fmpq(q, lmin, prec + 64, ARF_RND_NEAR);
+            switch (t) {
+            case 0: arf_nan(seed); break;
+            case 1: arf_pos_inf(seed); break;
+            case 2: arf_neg_inf(seed); break;
+            case 3: arf_add_si(seed, q, 1, prec + 64, ARF_RND_NEAR); break;
+            case 4: arf_one(seed); arf_mul_2exp_si(seed, seed, -400);
+                    arf_add(seed, q, seed, prec + 64, ARF_RND_UP); break;
+            case 5: arf_one(seed); arf_mul_2exp_si(seed, seed, 1000); break;
+            default: arf_one(seed); arf_mul_2exp_si(seed, seed, 1000); arf_neg(seed, seed); break;
+            }
+            arbsdp_lambda_min_lower_bound_seeded(d, A, seed, prec);
+            if (!d_le_exact(d, lmin) || !arb_is_finite(d))
+                bad++;
+            arf_clear(q);
+        }
+    }
+    CHECK(bad == 0, "ml6 adversarial seed: d <= lambda_min and finite for every garbage seed");
+    printf("  [ml6] adversarial seeds: %d/28 violations\n", bad);
+    arf_clear(seed);
+    arb_clear(d);
+    arb_mat_clear(A);
+    fmpq_clear(lmin);
+    _fmpq_vec_clear(D, n);
 }
 
 /* ----- Step 6: arbsdp_dual_residual ENCLOSURE (bead b18) ------------------ *
@@ -888,6 +1201,9 @@ main(void)
     test_lambda_min_bisection();
     test_eig_crosscheck();
     test_lambda_min_growth_exhausted();
+    test_lambda_min_tight_and_cheap();
+    test_lambda_min_property();
+    test_lambda_min_adversarial_seed();
     test_dual_residual();
     test_apriori();
 
